@@ -39,14 +39,37 @@ Single static binary, no runtime dependencies:
 curl -fsSL https://raw.githubusercontent.com/2008wbbv/intraweb/main/install.sh | sh
 ```
 
-Or build it yourself:
+That fetches a prebuilt binary if one exists for your machine. If it does not,
+the script builds from source instead — and checks first that it can, rather
+than letting you find out several screens into a failed compile.
+
+### Building from source
+
+You need Rust and a **C compiler**. Rust shells out to `cc` to link every
+binary, and the bundled SQLite is C, so a machine with Rust but no toolchain
+(a fresh live session, a minimal container) will fail with
+``linker `cc` not found``.
 
 ```sh
-cargo build --release   # target/release/intraweb
+sudo apt-get install -y build-essential   # Debian, Ubuntu, Mint
+sudo dnf install -y gcc                   # Fedora, RHEL
+sudo pacman -S --needed base-devel        # Arch
+sudo apk add build-base                   # Alpine
+xcode-select --install                    # macOS
 ```
 
-For off-grid provisioning, copying the binary over with `scp` or a USB stick
-works exactly as well — there is nothing else to install.
+Then:
+
+```sh
+git clone https://github.com/2008wbbv/intraweb.git
+cd intraweb
+sh install.sh          # builds and installs to ~/.local/bin
+# or: cargo build --release   → target/release/intraweb
+```
+
+For off-grid provisioning, copying the finished binary over with `scp` or a USB
+stick works exactly as well — there is nothing else to install, and the machine
+you copy it to needs no toolchain at all.
 
 ## Use
 
