@@ -22,6 +22,12 @@ use intraweb_core::{Config, Identity, Store};
 /// is never waiting on the next tick.
 const TICK: Duration = Duration::from_millis(250);
 
+/// Lines the header draws, and the rows it needs once borders are added.
+/// These drifted apart once and silently clipped the roster counts off the
+/// bottom of the header, so the relationship is asserted in the tests.
+const HEADER_LINES: usize = 3;
+const HEADER_HEIGHT: u16 = HEADER_LINES as u16 + 2;
+
 pub struct Dashboard {
     roster: Roster,
     identity: Arc<Identity>,
@@ -104,7 +110,11 @@ impl Dashboard {
 
     fn draw(&mut self, frame: &mut Frame, peers: &[Peer]) {
         let [header, body, footer] =
-            Layout::vertical([Constraint::Length(4), Constraint::Min(3), Constraint::Length(3)])
+            Layout::vertical([
+                Constraint::Length(HEADER_HEIGHT),
+                Constraint::Min(3),
+                Constraint::Length(3),
+            ])
                 .areas(frame.area());
 
         frame.render_widget(self.header(peers), header);
@@ -120,30 +130,13 @@ impl Dashboard {
             "peer".to_string()
         };
 
-        Paragraph::new(vec![
-            Line::from(vec![
-                Span::styled(
-                    "intraweb",
-                    Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
-                ),
-                Span::styled("  your neighborhood web", Style::default().fg(Color::DarkGray)),
-            ]),
-            Line::from(vec![
-                Span::styled(
-                    self.config.sanitized_nickname(),
-                    Style::default().add_modifier(Modifier::BOLD),
-                ),
-                Span::raw(format!("  {}  ", role)),
-                Span::styled(self.identity.fingerprint(), Style::default().fg(Color::DarkGray)),
-            ]),
-            Line::from(Span::styled(
-                format!(
-                    "{} neighbor(s) online, {hubs} hub(s) in range",
-                    peers.len().saturating_sub(hubs)
-                ),
-                Style::default().fg(Color::DarkGray),
-            )),
-        ])
+        Paragraph::new(header_lines(
+            &self.config.sanitized_nickname(),
+            &role,
+            &self.identity.fingerprint(),
+            peers.len(),
+            hubs,
+        ))
         .block(Block::bordered())
     }
 
@@ -183,6 +176,48 @@ impl Dashboard {
     }
 }
 
+/// The header's contents. Must always be exactly `HEADER_LINES` lines.
+fn header_lines(
+    nickname: &str,
+    role: &str,
+    fingerprint: &str,
+    peers: usize,
+    hubs: usize,
+) -> Vec<Line<'static>> {
+    vec![
+        Line::from(vec![
+            Span::styled(
+                "intraweb",
+                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("  your neighborhood web", Style::default().fg(Color::DarkGray)),
+        ]),
+        Line::from(vec![
+            Span::styled(nickname.to_string(), Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw(format!("  {role}  ")),
+            Span::styled(fingerprint.to_string(), Style::default().fg(Color::DarkGray)),
+        ]),
+        Line::from(Span::styled(
+            format!("{} neighbor(s) online, {hubs} hub(s) in range", peers.saturating_sub(hubs)),
+            Style::default().fg(Color::DarkGray),
+        )),
+    ]
+}
+
+/// Column widths chosen so a long nickname pushes its own row out rather than
+/// knocking the whole list out of alignment.
+const NICK_WIDTH: usize = 16;
+const ADDR_WIDTH: usize = 17;
+
+/// Pad to a column width, letting anything longer simply overflow.
+fn pad(text: &str, width: usize) -> String {
+    let len = text.chars().count();
+    if len >= width {
+        return format!("{text} ");
+    }
+    format!("{text}{}", " ".repeat(width - len))
+}
+
 fn roster_row(peer: &Peer, now: u64) -> ListItem<'static> {
     let (marker, marker_style) = match peer.trust {
         // The one case worth shouting about: a known name on an unknown key.
@@ -208,13 +243,15 @@ fn roster_row(peer: &Peer, now: u64) -> ListItem<'static> {
     let mut lines = vec![Line::from(vec![
         Span::styled(marker, marker_style),
         Span::raw(" "),
-        Span::styled(peer.nickname.clone(), label_style),
+        Span::styled(pad(&peer.nickname, NICK_WIDTH), label_style),
+        Span::styled(pad(if peer.is_hub { "[hub]" } else { "" }, 7), Style::default().fg(Color::Cyan)),
         Span::styled(
-            if peer.is_hub { "  [hub]" } else { "" },
-            Style::default().fg(Color::Cyan),
-        ),
-        Span::styled(
-            format!("  {address}  {}  {}s ago", peer.fingerprint, now.saturating_sub(peer.last_seen)),
+            format!(
+                "{}{}  {}s ago",
+                pad(&address, ADDR_WIDTH),
+                peer.fingerprint,
+                now.saturating_sub(peer.last_seen),
+            ),
             Style::default().fg(Color::DarkGray),
         ),
     ])];
@@ -227,4 +264,55 @@ fn roster_row(peer: &Peer, now: u64) -> ListItem<'static> {
     }
 
     ListItem::new(lines)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Regression: the header block was sized at four rows while drawing three
+    /// lines, so "N neighbor(s) online" was clipped away with no error anywhere.
+    #[test]
+    fn the_header_block_is_tall_enough_for_what_it_draws() {
+        let drawn = header_lines("carol", "peer", "844c-8e7b-9dfd-5d0a", 3, 1);
+
+        assert_eq!(drawn.len(), HEADER_LINES);
+        assert!(
+            HEADER_HEIGHT as usize >= drawn.len() + 2,
+            "header needs a row per line plus two borders",
+        );
+    }
+
+    #[test]
+    fn the_counts_line_excludes_hubs_from_the_neighbor_total() {
+        let drawn = header_lines("carol", "peer", "fp", 3, 1);
+        let counts: String =
+            drawn[2].spans.iter().map(|span| span.content.as_ref()).collect();
+
+        assert_eq!(counts, "2 neighbor(s) online, 1 hub(s) in range");
+    }
+
+    #[test]
+    fn the_counts_line_never_underflows() {
+        // More hubs than peers should be impossible, but saturating here is
+        // cheaper than a panic in a render loop.
+        let drawn = header_lines("carol", "peer", "fp", 0, 2);
+        let counts: String =
+            drawn[2].spans.iter().map(|span| span.content.as_ref()).collect();
+
+        assert!(counts.starts_with("0 neighbor(s)"));
+    }
+
+    #[test]
+    fn columns_pad_to_width_so_fingerprints_line_up() {
+        assert_eq!(pad("bob", 8), "bob     ");
+        assert_eq!(pad("", 4), "    ");
+    }
+
+    #[test]
+    fn an_overlong_nickname_pushes_only_its_own_row() {
+        // One long name must not silently truncate; it just costs a space.
+        let long = "a".repeat(20);
+        assert_eq!(pad(&long, NICK_WIDTH), format!("{long} "));
+    }
 }

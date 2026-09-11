@@ -28,7 +28,7 @@ Every design question resolves against that sentence. In particular:
 | --- | --- | --- |
 | `intraweb-core` | Identity, vault, config, SQLite keyring, peer types | Know anything about networks |
 | `intraweb-net` | mDNS, UDP beacon, roster, diagnostics, orchestration | Know anything about HTTP or the UI |
-| `intraweb-cli` | CLI, JSON API, web dashboard, terminal UI | Hold state the roster should own |
+| `intraweb-cli` | CLI, JSON API, web dashboard, terminal UI, HTTP probing | Hold state the roster should own |
 
 The split is what lets discovery be tested without touching identity, and the
 roster be rendered twice without duplicating logic.
@@ -56,6 +56,22 @@ roster be rendered twice without duplicating logic.
    multicast; broadcast alone gives up `.local` names. Neither is optional.
 7. **Never hold the store lock across the roster lock**, or across an `.await`.
    `absorb()` scopes them deliberately.
+8. **Looking is not joining.** `surf` and anything else that only inspects the
+   network uses `Node::observe`, which listens without announcing. Browsing
+   what neighbors publish must not change what they see, and a second
+   announcement under the same key would collide with a node already running on
+   the machine.
+9. **Any listing of people shows trust.** `surf` prints the conflict warning and
+   fingerprint next to a name whose key has changed. Surfing is exactly where
+   impersonation would pay off, so no surface may render a bare nickname as if
+   it were an identity.
+10. **A rendered block must fit what it draws.** The TUI header was sized four
+    rows while drawing three lines plus borders, silently clipping the roster
+    counts. `HEADER_LINES`/`HEADER_HEIGHT` encode the relationship and a test
+    asserts it.
+11. **Tests never assume an empty network.** The machine running them may have
+    real nodes on it. Assert invariants (a warning always carries a remedy; the
+    verdict follows from the counts), not specific peer counts.
 
 ## Conventions
 
@@ -74,6 +90,16 @@ roster be rendered twice without duplicating logic.
 cargo test                 # unit + regression
 cargo clippy --all-targets -- -D warnings
 ```
+
+Screenshots of the terminal UI are taken from the real binary, not mocked:
+
+```sh
+tmux new-session -d -s iw -x 84 -y 13 "INTRAWEB_VAULT=/tmp/c intraweb up --tui"
+sleep 4 && tmux capture-pane -p -t iw
+```
+
+Beware `pkill -f intraweb` when cleaning up: the pattern matches the shell
+running it and kills your own command. Use `pkill -x intraweb`.
 
 Two nodes on one machine, which is also how discovery is tested end to end:
 

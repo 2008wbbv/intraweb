@@ -8,7 +8,7 @@ Running log of decisions, open questions, and known gaps. Append; do not rewrite
 | --- | --- | --- |
 | P0 | Discovery, identity, roster, both dashboards, doctor | **done** |
 | P1 | Local mail, store-and-forward, signed | not started |
-| P2 | Mini-site publishing from the dashboard | not started |
+| P2 | Mini-site publishing from the dashboard | partly — `serve` publishes a folder from the CLI |
 | P3 | Chunked, resumable direct file transfer | not started |
 | P4 | Mail attachments (P1 ∪ P3) | not started |
 
@@ -42,6 +42,34 @@ The `mail` table already exists in schema v1, so P1 is logic only.
   lands; transport port 8421 is announced but nothing listens on it until P1;
   beacon replay is bounded only by a 300s clock-skew window, which is
   proportionate for LAN presence but is not a nonce.
+<!-- MEMORY_UPDATE_END -->
+
+<!-- MEMORY_UPDATE_START -->
+### Update: 2026-09-11 (later)
+* **Decisions/Changes**: Added `intraweb serve <dir>` and `intraweb surf`.
+  `serve` publishes a folder in place at `/~nickname` — nothing is copied into
+  the vault, so pointing at a directory never disturbs what you normally
+  publish; it is `up` with a site override, so all the usual flags apply.
+  `surf` probes each neighbor over plain HTTP/1.0 and shows the page's own
+  `<title>`; no client crate, so the binary stays lean. Two boundaries were
+  decided by CLAUDE.md rather than convenience: HTTP probing lives in
+  `intraweb-cli` because `intraweb-net` must not know what a web page is, and
+  the surf listing shows conflict warnings with fingerprints because rule 3
+  requires name/key conflicts to be *shown*. Added `Node::observe` /
+  `MdnsNode::observer` so surfing listens without announcing — verified in a
+  live three-node run that the surfer never appeared in anyone's roster.
+  TUI screenshots captured from the real binary via tmux `capture-pane`.
+* **Known Bugs/Gaps**: Three more bugs found and fixed, each with a named
+  regression test: (1) the TUI header was sized 4 rows while drawing 3 lines
+  plus borders, silently clipping "N neighbor(s) online" — now an asserted
+  invariant; (2) roster columns were unaligned because nickname width varied;
+  (3) the doctor test asserted an empty network and failed the moment real
+  nodes were running — rewritten to assert invariants instead. Still open: no
+  way to open a peer's site from inside the TUI (surf covers it from the CLI);
+  `surf` re-probes every run with no caching, fine on a LAN but wasteful on a
+  large roster; `serve` does not watch the folder, so it serves whatever is on
+  disk at request time (which is actually the desired behavior, but means no
+  notification if the folder is deleted underneath it).
 <!-- MEMORY_UPDATE_END -->
 
 ## Open questions for Ben

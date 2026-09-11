@@ -48,6 +48,28 @@ pub struct Node {
 impl Node {
     /// Start announcing and listening. Returns once both loops are running.
     pub fn start(config: &Config, identity: Arc<Identity>, store: Arc<Mutex<Store>>) -> Result<Self> {
+        Self::spawn(config, identity, store, true)
+    }
+
+    /// Listen without announcing.
+    ///
+    /// For commands that look around rather than take part. Nobody else learns
+    /// we were here, and a node already running on this machine keeps its own
+    /// announcement uncontested.
+    pub fn observe(
+        config: &Config,
+        identity: Arc<Identity>,
+        store: Arc<Mutex<Store>>,
+    ) -> Result<Self> {
+        Self::spawn(config, identity, store, false)
+    }
+
+    fn spawn(
+        config: &Config,
+        identity: Arc<Identity>,
+        store: Arc<Mutex<Store>>,
+        announce: bool,
+    ) -> Result<Self> {
         let nickname = config.sanitized_nickname();
         let presence = Presence::new(
             &identity,
@@ -64,7 +86,11 @@ impl Node {
             Arc::new(RwLock::new(PeerRegistry::new(self_id, config.peer_timeout_secs)));
         let roster = Roster { inner: Arc::clone(&registry) };
 
-        let mdns = Arc::new(MdnsNode::start(&presence, &signature, config.hub)?);
+        let mdns = Arc::new(if announce {
+            MdnsNode::start(&presence, &signature, config.hub)?
+        } else {
+            MdnsNode::observer()?
+        });
 
         // Inbound mDNS.
         {
@@ -94,7 +120,7 @@ impl Node {
 
             // Outbound beacons. Re-signed each time so the timestamp stays
             // fresh and old packets cannot be replayed indefinitely.
-            {
+            if announce {
                 let beacon = Arc::clone(&beacon);
                 let identity = Arc::clone(&identity);
                 let config = config.clone();

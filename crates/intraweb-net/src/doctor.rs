@@ -287,14 +287,45 @@ mod tests {
         assert!(!broadcast_targets().is_empty(), "there is always a fallback target");
     }
 
+    /// Deliberately makes no claim about how many nodes are around: the machine
+    /// running the tests may well have real nodes on it, and a diagnostic that
+    /// only passes on an empty network is not testing anything useful.
     #[tokio::test]
-    async fn doctor_runs_without_peers_and_reports_honestly() {
+    async fn doctor_reports_honestly_whoever_else_is_on_the_network() {
         let report = run(0, Duration::from_millis(250)).await.unwrap();
 
-        assert!(!report.checks.is_empty());
-        assert_eq!(report.mdns_peers, 0);
-        assert_eq!(report.beacon_peers, 0);
-        // An empty network is a warning, never a hard failure.
-        assert_ne!(report.worst_status(), Status::Fail);
+        assert!(!report.checks.is_empty(), "a report with no checks tells nobody anything");
+
+        // Whatever it heard, the verdict must be the reading of those counts.
+        assert_eq!(
+            report.verdict,
+            verdict_for(local_addresses().is_empty(), report.mdns_peers, report.beacon_peers),
+            "the verdict must follow from the counts it reported",
+        );
+
+        // The whole point of this command: never say something is wrong
+        // without saying what to do about it.
+        for check in &report.checks {
+            if check.status != Status::Pass {
+                assert!(check.remedy.is_some(), "check '{}' warns with no remedy", check.name);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_quiet_network_is_never_a_hard_failure() {
+        // Being first to arrive is normal, not an error worth exiting nonzero.
+        let checks = vec![
+            Check::pass("network interface", "reachable at 192.0.2.2"),
+            Check::warn("mdns peers", "heard nothing over multicast", "nobody else may be up"),
+        ];
+        let report = Report {
+            checks,
+            verdict: verdict_for(false, 0, 0),
+            mdns_peers: 0,
+            beacon_peers: 0,
+        };
+
+        assert_eq!(report.worst_status(), Status::Warn);
     }
 }

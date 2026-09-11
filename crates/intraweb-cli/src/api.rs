@@ -20,6 +20,7 @@ use intraweb_core::{Config, Identity, Store, Vault};
 use intraweb_net::Roster;
 use serde::Serialize;
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tower_http::services::ServeDir;
@@ -36,6 +37,9 @@ pub struct AppState {
     pub store: Arc<Mutex<Store>>,
     pub config: Arc<Config>,
     pub vault: Arc<Vault>,
+    /// What to publish as this node's site. Normally the vault's `site/`, but
+    /// `intraweb serve` points it at a folder without copying anything in.
+    pub site_dir: PathBuf,
     pub started_at: u64,
 }
 
@@ -52,6 +56,7 @@ struct Status {
     hubs_online: usize,
     known_peers: u64,
     vault_path: String,
+    site_path: String,
     uptime_secs: u64,
     now: u64,
 }
@@ -76,6 +81,7 @@ async fn status(State(state): State<AppState>) -> impl IntoResponse {
         hubs_online: state.roster.hubs().len(),
         known_peers,
         vault_path: state.vault.root().display().to_string(),
+        site_path: state.site_dir.display().to_string(),
         uptime_secs: now_secs().saturating_sub(state.started_at),
         now: now_secs(),
     })
@@ -133,9 +139,9 @@ async fn doctor(State(state): State<AppState>) -> impl IntoResponse {
 pub fn router(state: AppState) -> Router {
     let nickname = state.config.sanitized_nickname();
 
-    // Your own site and files, served straight off the vault. This is the one
-    // folder that follows you to every hub.
-    let site = ServeDir::new(state.vault.site_dir());
+    // Your own site and files, served straight off disk. Normally the vault's
+    // own folder -- the one that follows you to every hub.
+    let site = ServeDir::new(&state.site_dir);
     let files = ServeDir::new(state.vault.files_dir());
 
     Router::new()

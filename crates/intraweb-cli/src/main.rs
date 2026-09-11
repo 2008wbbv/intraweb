@@ -1,6 +1,7 @@
 //! intraweb -- your neighborhood web.
 
 mod api;
+mod surf;
 mod tui;
 
 use anyhow::{Context, Result};
@@ -39,6 +40,25 @@ enum Command {
         #[arg(long, default_value_t = 5)]
         listen: u64,
     },
+    /// Publish a folder to the neighborhood without copying it into your vault.
+    Serve {
+        /// The directory to publish as your site.
+        #[arg(value_name = "DIR")]
+        dir: PathBuf,
+
+        #[command(flatten)]
+        args: UpArgs,
+    },
+    /// See what your neighbors are publishing.
+    Surf {
+        /// Seconds to listen for neighbors before asking what they serve.
+        #[arg(long, default_value_t = 3)]
+        listen: u64,
+
+        /// Open this numbered site in a browser instead of only listing.
+        #[arg(long, value_name = "N")]
+        open: Option<usize>,
+    },
     /// Print your identity and where your vault lives.
     Id,
 }
@@ -68,6 +88,10 @@ struct UpArgs {
     /// Turn off UDP broadcast and rely on mDNS alone.
     #[arg(long)]
     no_beacon: bool,
+
+    /// Publish this folder instead of the vault's own site/ directory.
+    #[arg(long, value_name = "DIR")]
+    site: Option<PathBuf>,
 }
 
 #[tokio::main]
@@ -82,8 +106,14 @@ async fn main() -> Result<()> {
         port: None,
         tui: false,
         no_beacon: false,
+        site: None,
     })) {
         Command::Up(args) => up(vault, args).await,
+        Command::Serve { dir, mut args } => {
+            args.site = Some(dir);
+            up(vault, args).await
+        }
+        Command::Surf { listen, open } => surf_command(vault, listen, open).await,
         Command::Doctor { listen } => doctor(vault, listen).await,
         Command::Id => show_id(vault),
     }
@@ -125,6 +155,19 @@ async fn up(vault: Vault, args: UpArgs) -> Result<()> {
         config.beacon_enabled = false;
     }
 
+    // A served folder is published in place; nothing is copied into the vault,
+    // so pointing at a directory never disturbs what you normally publish.
+    let site_dir = match &args.site {
+        Some(dir) => {
+            let dir = dir.canonicalize().with_context(|| {
+                format!("could not find the folder to serve: {}", dir.display())
+            })?;
+            anyhow::ensure!(dir.is_dir(), "{} is not a directory", dir.display());
+            dir
+        }
+        None => vault.site_dir(),
+    };
+
     let store = Arc::new(Mutex::new(Store::open(&vault.db_path())?));
     let config = Arc::new(config);
     let vault = Arc::new(vault);
@@ -143,6 +186,7 @@ async fn up(vault: Vault, args: UpArgs) -> Result<()> {
         store: Arc::clone(&store),
         config: Arc::clone(&config),
         vault: Arc::clone(&vault),
+        site_dir: site_dir.clone(),
         started_at: now_secs(),
     };
 
@@ -173,7 +217,9 @@ async fn up(vault: Vault, args: UpArgs) -> Result<()> {
         println!("intraweb -- your neighborhood web");
         println!("  you        {} ({})", config.sanitized_nickname(), identity.fingerprint());
         println!("  vault      {}", vault.root().display());
+        println!("  serving    {}", site_dir.display());
         println!("  dashboard  {where_to_go}");
+        println!("  your site  {where_to_go}/~{}", config.sanitized_nickname());
         if config.hub {
             println!("  hosting    {}", config.hub_name);
         }
@@ -187,6 +233,83 @@ async fn up(vault: Vault, args: UpArgs) -> Result<()> {
     }
 
     node.shutdown();
+    Ok(())
+}
+
+/// Look around the neighborhood and report what is being published.
+///
+/// This listens without announcing: looking at what neighbors serve should not
+/// change what they see, and it keeps a node already running on this machine
+/// from colliding with a second announcement under the same key.
+async fn surf_command(vault: Vault, listen: u64, open: Option<usize>) -> Result<()> {
+    let (identity, config, _) = open_vault(&vault)?;
+    let store = Arc::new(Mutex::new(Store::open(&vault.db_path())?));
+    let config = Arc::new(config);
+
+    let node = Node::observe(&config, Arc::clone(&identity), Arc::clone(&store))
+        .context("could not listen for neighbors")?;
+
+    println!("Looking around the neighborhood for {listen}s...");
+    tokio::time::sleep(Duration::from_secs(listen)).await;
+
+    let peers = node.roster.peers();
+    node.shutdown();
+
+    if peers.is_empty() {
+        println!("\nNobody is publishing anything right now.");
+        println!("If you expected company, run `intraweb doctor` -- an empty list");
+        println!("usually means the access point, not a broken node.");
+        return Ok(());
+    }
+
+    let sites = surf::survey(peers, surf::PROBE_TIMEOUT).await;
+    // Reachable sites first; nothing is more annoying than a listing led by
+    // things you cannot open.
+    let mut sites = sites;
+    sites.sort_by(|a, b| {
+        b.reachable
+            .cmp(&a.reachable)
+            .then_with(|| b.is_hub.cmp(&a.is_hub))
+            .then_with(|| a.nickname.cmp(&b.nickname))
+    });
+
+    if let Some(choice) = open {
+        let Some(site) = choice.checked_sub(1).and_then(|i| sites.get(i)) else {
+            anyhow::bail!("there is no site {choice}; run `intraweb surf` to see the list");
+        };
+        println!("Opening {}", site.url);
+        return surf::open_in_browser(&site.url);
+    }
+
+    let width = sites.iter().map(|s| s.nickname.chars().count()).max().unwrap_or(8).max(8);
+    println!();
+    for (index, site) in sites.iter().enumerate() {
+        let marker = if site.is_hub { "*" } else { " " };
+        println!(
+            "{marker} {:>2}  {:<width$}  {:<34}  {}",
+            index + 1,
+            site.nickname,
+            site.describe(),
+            site.url,
+        );
+        // Never let a familiar-looking name stand on its own when the key
+        // behind it has changed.
+        if let Some(warning) = site.warning() {
+            println!("      {:<width$}  !! {warning}", "");
+        }
+    }
+
+    let unreachable = sites.iter().filter(|s| !s.reachable).count();
+    println!();
+    if sites.iter().any(|s| s.is_hub) {
+        println!("* hub");
+    }
+    if unreachable > 0 {
+        println!(
+            "{unreachable} neighbor(s) are announcing but not answering -- they may have just left."
+        );
+    }
+    println!("Open one with: intraweb surf --open <number>");
     Ok(())
 }
 

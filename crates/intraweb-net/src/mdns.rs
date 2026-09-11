@@ -26,7 +26,8 @@ pub struct MdnsSighting {
 
 pub struct MdnsNode {
     daemon: ServiceDaemon,
-    fullname: String,
+    /// `None` for an observer, which browses without announcing itself.
+    fullname: Option<String>,
 }
 
 impl MdnsNode {
@@ -63,7 +64,17 @@ impl MdnsNode {
         daemon.register(service).context("could not register over mDNS")?;
         tracing::info!(%fullname, %host_name, "announcing over mDNS");
 
-        Ok(Self { daemon, fullname })
+        Ok(Self { daemon, fullname: Some(fullname) })
+    }
+
+    /// Browse without announcing.
+    ///
+    /// Looking around should not change what the network sees. It also avoids
+    /// a second instance colliding with a node already running on this machine
+    /// under the same key.
+    pub fn observer() -> Result<Self> {
+        let daemon = ServiceDaemon::new().context("could not start the mDNS responder")?;
+        Ok(Self { daemon, fullname: None })
     }
 
     /// Stream peers as mDNS resolves them.
@@ -101,7 +112,9 @@ impl MdnsNode {
 
     /// Withdraw our announcement so peers drop us promptly instead of timing out.
     pub fn shutdown(&self) {
-        let _ = self.daemon.unregister(&self.fullname);
+        if let Some(fullname) = &self.fullname {
+            let _ = self.daemon.unregister(fullname);
+        }
         let _ = self.daemon.shutdown();
     }
 }

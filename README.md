@@ -54,6 +54,8 @@ works exactly as well — there is nothing else to install.
 intraweb up                        # join the neighborhood
 intraweb up --hub --hub-name oak   # host a hub at intranet.local
 intraweb up --tui                  # same thing, in the terminal
+intraweb serve ./photos            # publish a folder to the neighborhood
+intraweb surf                      # see what the neighbors are publishing
 intraweb doctor                    # why can't I see anyone?
 intraweb id                        # my fingerprint, for verifying in person
 ```
@@ -75,6 +77,62 @@ network.
 
 Drop an `index.html` in `site/` and it is live at every hub you join. Point
 `$INTRAWEB_VAULT` somewhere else to run more than one node on one machine.
+
+
+## In the terminal
+
+`intraweb up --tui` gives the same roster as the browser dashboard, reading the
+same live state — useful over SSH on a headless Pi.
+
+```
+┌──────────────────────────────────────────────────────────────────────────────────┐
+│intraweb  your neighborhood web                                                   │
+│carol  peer  844c-8e7b-9dfd-5d0a                                                  │
+│1 neighbor(s) online, 1 hub(s) in range                                           │
+└──────────────────────────────────────────────────────────────────────────────────┘
+┌ Neighborhood ────────────────────────────────────────────────────────────────────┐
+│  alice           [hub]  192.0.2.2        7abc-41d0-bd44-f2c2  1s ago             │
+│* bob                    192.0.2.2        b1f1-13ab-865f-f337  1s ago             │
+│                                                                                  │
+└──────────────────────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────────────────┐
+│j/k move   v mark verified after comparing fingerprints   q quit                  │
+└──────────────────────────────────────────────────────────────────────────────────┘
+```
+
+`*` marks a neighbor whose fingerprint you have checked in person. A neighbor
+using a name you have seen before on a **different key** is called out in red
+rather than quietly shown as a familiar face.
+
+## Publishing and browsing
+
+Publish any folder without copying it into your vault:
+
+```sh
+intraweb serve ./photos
+```
+
+The folder is served in place at `/~yourname`, on every hub you are joined to,
+and your vault's own `site/` is left exactly as it was.
+
+To see what everyone else is publishing:
+
+```
+Looking around the neighborhood for 3s...
+
+*  1  alice     Basecamp Notice Board               http://192.0.2.2:8480/~alice
+   2  bob       A corner of the neighborhood web    http://192.0.2.2:8481/~bob
+   3  carol     A corner of the neighborhood web    http://192.0.2.2:8482/~carol
+
+* hub
+Open one with: intraweb surf --open <number>
+```
+
+`surf` asks each neighbor directly and shows the page's own `<title>`. There is
+no index and no crawler — the roster supplies addresses and your machine speaks
+to theirs. A neighbor that is announcing but not answering is listed as such
+instead of being hidden, and a name that has changed keys carries a warning with
+the fingerprint you need to tell the two apart.
 
 ## Trust
 
@@ -113,9 +171,9 @@ so many networks quietly break one of them.
 
 ## Status
 
-P0 is done: discovery, identity, the roster, both dashboards, and diagnostics.
-Mail, mini-site publishing from the dashboard, and direct file transfer are
-next — see `NOTES.md` for the plan and the open questions.
+P0 is done: discovery, identity, the roster, both dashboards, diagnostics,
+`serve`, and `surf`. Mail, publishing from the dashboard, and direct file
+transfer are next — see `NOTES.md` for the plan and the open questions.
 
 ## License
 
