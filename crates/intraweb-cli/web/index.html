@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>intraweb</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header class="masthead">
+  <div class="wordmark">
+    <h1>intraweb</h1>
+    <p class="slogan">your neighborhood web</p>
+  </div>
+  <div class="me" id="me" aria-live="polite">
+    <span class="spinner">connecting&hellip;</span>
+  </div>
+</header>
+
+<main>
+  <section aria-labelledby="hubs-heading">
+    <div class="section-head">
+      <h2 id="hubs-heading">Neighborhoods</h2>
+      <span class="count" id="hub-count"></span>
+    </div>
+    <p class="hint">You appear on every hub in range at once, serving the same
+       vault to each. Leaving one takes nothing away from you.</p>
+    <div id="hubs" class="grid"></div>
+  </section>
+
+  <section aria-labelledby="peers-heading">
+    <div class="section-head">
+      <h2 id="peers-heading">Neighbors</h2>
+      <span class="count" id="peer-count"></span>
+    </div>
+    <div id="peers" class="grid"></div>
+  </section>
+
+  <section aria-labelledby="doctor-heading">
+    <div class="section-head">
+      <h2 id="doctor-heading">Network check</h2>
+      <button id="run-doctor" type="button">Run check</button>
+    </div>
+    <p class="hint">If neighbors you expect are missing, run this. Most missing
+       neighbors are the router's doing, not a broken node.</p>
+    <div id="doctor"></div>
+  </section>
+</main>
+
+<footer>
+  <span id="vault-path"></span>
+</footer>
+
+<script src="/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,27 @@
+[package]
+name = "intraweb-cli"
+description = "The intraweb daemon, dashboard, and terminal client"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "intraweb"
+path = "src/main.rs"
+
+[dependencies]
+intraweb-core = { path = "../intraweb-core" }
+intraweb-net = { path = "../intraweb-net" }
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+axum = "0.8"
+tower-http = { version = "0.6", features = ["fs", "trace"] }
+clap = { version = "4", features = ["derive"] }
+ratatui = "0.30"
+mime_guess = "2"
