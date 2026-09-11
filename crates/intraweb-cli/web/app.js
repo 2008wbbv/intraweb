@@ -127,16 +127,62 @@ function renderDoctor(report) {
     `${checks}<div class="verdict">${escapeHtml(report.verdict)}</div>`;
 }
 
+function renderMail(messages, now) {
+  const unread = messages.filter((m) => !m.read_at).length;
+  document.getElementById("mail-count").textContent =
+    messages.length === 0 ? "" : `${messages.length} received${unread ? `, ${unread} unread` : ""}`;
+
+  document.getElementById("mail").innerHTML = messages.length
+    ? messages
+        .map(
+          (message) => `
+        <article class="letter ${message.read_at ? "" : "unread"}">
+          <div class="subject">${escapeHtml(message.subject || "(no subject)")}</div>
+          <div class="from">${escapeHtml(message.peer_id.slice(0, 16))}&hellip;
+            &middot; ${escapeHtml(relativeTime(Math.max(0, now - message.created_at)))}</div>
+          <div class="body">${escapeHtml(message.body)}</div>
+        </article>`,
+        )
+        .join("")
+    : '<p class="empty">No mail yet.</p>';
+}
+
 async function refresh() {
   try {
-    const [status, peers] = await Promise.all([getJson("/api/status"), getJson("/api/peers")]);
-    renderMe(status);
-    renderRosters(peers, status);
+    // One request: status, roster and mail are always rendered together.
+    const state = await getJson("/api/state");
+    renderMe(state.status);
+    renderRosters(state.peers, state.status);
+    renderMail(state.mail, state.status.now);
   } catch (err) {
     document.getElementById("me").innerHTML =
       '<span class="spinner">node unreachable&hellip;</span>';
   }
 }
+
+document.getElementById("compose").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const result = document.getElementById("compose-result");
+  const payload = {
+    to: document.getElementById("compose-to").value,
+    subject: document.getElementById("compose-subject").value,
+    body: document.getElementById("compose-body").value,
+  };
+
+  result.textContent = "Sending\u2026";
+  const response = await fetch("/api/mail/send", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  // The server reports ambiguity in full; show it rather than a generic failure.
+  result.textContent = await response.text();
+  if (response.ok) {
+    document.getElementById("compose-subject").value = "";
+    document.getElementById("compose-body").value = "";
+    refresh();
+  }
+});
 
 document.addEventListener("click", async (event) => {
   const verifyButton = event.target.closest("[data-verify]");

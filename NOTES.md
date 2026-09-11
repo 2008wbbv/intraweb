@@ -7,12 +7,15 @@ Running log of decisions, open questions, and known gaps. Append; do not rewrite
 | Phase | Scope | State |
 | --- | --- | --- |
 | P0 | Discovery, identity, roster, both dashboards, doctor | **done** |
-| P1 | Local mail, store-and-forward, signed | not started |
-| P2 | Mini-site publishing from the dashboard | partly — `serve` publishes a folder from the CLI |
-| P3 | Chunked, resumable direct file transfer | not started |
+| P1 | Local mail, store-and-forward, signed | **done** |
+| P2 | Mini-site publishing from the dashboard | partly — `serve` does it from the CLI; no upload UI |
+| P3 | Resumable direct file transfer | **done** — ranged HTTP, `ls` / `get` |
 | P4 | Mail attachments (P1 ∪ P3) | not started |
+| — | Release CI, cross-compiled musl + macOS binaries | **done** |
 
-The `mail` table already exists in schema v1, so P1 is logic only.
+Schema is at v2: v1 created the keyring and the mail table, v2 added unread
+tracking and the inbound-duplicate guard. Migrations are additive and a vault
+from the first release opens without the operator doing anything.
 
 <!-- MEMORY_UPDATE_START -->
 ### Update: 2026-09-11
@@ -42,6 +45,46 @@ The `mail` table already exists in schema v1, so P1 is logic only.
   lands; transport port 8421 is announced but nothing listens on it until P1;
   beacon replay is bounded only by a 300s clock-skew window, which is
   proportionate for LAN presence but is not a nonce.
+<!-- MEMORY_UPDATE_END -->
+
+<!-- MEMORY_UPDATE_START -->
+### Update: 2026-09-11 (P1 + P3 + efficiency)
+* **Decisions/Changes**: The open questions are now decided. **Mail and files
+  ride the node's own HTTP port** rather than a bespoke socket protocol, so
+  `transport_port` is gone and the wire format is protocol v2. This was the
+  session's biggest call: `ServeDir` already answers Range requests, so
+  resumable transfer existed for free and a whole framed protocol was deleted
+  before being written. Verified against a 30 MB file truncated mid-transfer —
+  server returns 206, the resumed file's SHA-256 matches the original.
+  **Mail addressing is key-anchored**: a nickname resolves, a nickname held by
+  two keys is refused with both fingerprints, and a bare public key always
+  works so you can write to someone from a key on paper. Mail to an offline
+  peer queues and the sender's outbox loop delivers when they appear
+  (verified live: queued to a never-seen key, carol came online, delivered).
+  Three efficiency changes, each justified rather than speculative: keyring
+  write-through throttled to 60s (was a SQLite UPDATE per peer per 2s beacon —
+  pointless flash wear on an SD card), interface enumeration cached for 30s
+  (was a full `getifaddrs` every announce, forever), and the dashboard's two
+  polls merged into one `/api/state`. A running node now publishes its bound
+  port in `runtime.json`, so local commands read its roster instead of
+  re-discovering: `mail send` went from 3s to 0.019s. Release CI added
+  (musl x86_64/aarch64 + both macOS arches), so `install.sh` finally points at
+  artifacts that will exist.
+* **Considered and rejected**: caching the roster snapshot. `last_seen` changes
+  on every sighting, so the cache would invalidate almost as often as it was
+  read — real complexity, near-zero gain.
+* **Known Bugs/Gaps**: Four bugs found and fixed this pass. (1) Throttling
+  write-through made a verified peer look unverified for up to a minute;
+  `Roster::note_verified` now applies it instantly, which is better than the
+  old behavior. (2) `mail send` marked delivery using "the newest pending row"
+  instead of the id `queue` returned — wrong row if two were queued in the same
+  second. (3) Mail could not be addressed to anyone out of range at all, which
+  defeated the outbox entirely. (4) An expected error (unknown recipient) dumped
+  an anyhow backtrace; `main` now prints the error chain and exits 1.
+  Still open: no attachments on mail; no upload UI for sites; `surf` re-probes
+  with no caching; mail has no delete or reply; the beacon's replay window is
+  still a 300s clock-skew bound rather than a nonce; nothing rate-limits inbound
+  mail beyond the 256 KiB body cap, so a hostile LAN peer could fill a disk.
 <!-- MEMORY_UPDATE_END -->
 
 <!-- MEMORY_UPDATE_START -->
@@ -82,13 +125,19 @@ Answered in session (recorded so they are not re-litigated):
 4. Targets — aarch64 + x86_64; Pi Zero / ARMv6 dropped.
 5. Federation — many hubs per node, one shared vault. *(revised mid-build)*
 
-Still unanswered, defaults assumed and noted in the build:
+Decided while building, no longer open:
 
-6. **Resumable transfers in P3** — assumed yes. Worth ~100 LOC for field use.
-7. **Release hosting** — assumed GitHub Releases; no domain wired up.
-8. **Service lifecycle** — no systemd/launchd integration yet. The port-80
-   fallback now prints a real `setcap` command instead of naming an unbuilt
-   subcommand. Decide in P1 whether `intraweb service install` is worth having.
-9. **Mail addressing** — now that identity is portable, is mail addressed to a
-   fingerprint, or to a nickname resolved through whichever hub you share?
-   Portability makes this a genuinely open question, not a default.
+6. **Resumable transfers** — yes, and they cost nothing: ranged HTTP.
+7. **Release hosting** — GitHub Releases, wired up in `.github/workflows`.
+8. **Service lifecycle** — not building it. The port-80 fallback prints a real
+   `setcap` command, which is all it was ever going to do.
+9. **Mail addressing** — by key. Nicknames resolve as a convenience; ambiguity
+   is refused rather than guessed.
+10. **Transport** — one HTTP port for everything. No second protocol.
+
+Genuinely still open:
+
+11. **Attachments.** Mail carries text. An attachment is a file reference plus a
+    pull, not a body — but whose disk holds it until it is fetched?
+12. **Inbound mail limits.** Nothing rate-limits a hostile peer beyond the body
+    cap. A per-sender quota probably belongs before any wider deployment.

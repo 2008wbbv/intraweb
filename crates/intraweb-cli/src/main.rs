@@ -1,13 +1,15 @@
 //! intraweb -- your neighborhood web.
 
 mod api;
+mod http;
+mod mail;
 mod surf;
 mod tui;
 
 use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand};
-use intraweb_core::peer::now_secs;
-use intraweb_core::{Config, Identity, Store, Vault};
+use intraweb_core::peer::{Peer, now_secs};
+use intraweb_core::{Config, Identity, Runtime, Store, Vault};
 use intraweb_net::Node;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -59,8 +61,46 @@ enum Command {
         #[arg(long, value_name = "N")]
         open: Option<usize>,
     },
+    /// Send and read local mail.
+    Mail {
+        #[command(subcommand)]
+        cmd: Option<MailCmd>,
+    },
+    /// List the files a neighbor is sharing.
+    Ls {
+        /// Nickname, fingerprint, or public key.
+        peer: String,
+    },
+    /// Download a file from a neighbor. Interrupted downloads resume.
+    Get {
+        /// Nickname, fingerprint, or public key.
+        peer: String,
+        /// Path as shown by `intraweb ls`.
+        file: String,
+        /// Where to write it. Defaults to the file's own name here.
+        #[arg(long, short, value_name = "PATH")]
+        output: Option<PathBuf>,
+    },
     /// Print your identity and where your vault lives.
     Id,
+}
+
+#[derive(Subcommand)]
+enum MailCmd {
+    /// Write to a neighbor. Queues if they are not in range yet.
+    Send {
+        /// Nickname, fingerprint, or public key.
+        to: String,
+        #[arg(long, short, default_value = "")]
+        subject: String,
+        /// The message. Read from stdin when omitted.
+        #[arg(long, short)]
+        message: Option<String>,
+    },
+    /// Show what you have received.
+    Inbox,
+    /// Show what you have sent, and what is still waiting.
+    Outbox,
 }
 
 #[derive(Args)]
@@ -95,7 +135,16 @@ struct UpArgs {
 }
 
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn main() {
+    // Print the error chain rather than a Debug backtrace: "no neighbor matches
+    // that name" is an ordinary outcome, not a crash report.
+    if let Err(err) = run().await {
+        eprintln!("Error: {err:#}");
+        std::process::exit(1);
+    }
+}
+
+async fn run() -> Result<()> {
     let cli = Cli::parse();
     let vault = Vault::resolve(cli.vault)?;
 
@@ -114,6 +163,9 @@ async fn main() -> Result<()> {
             up(vault, args).await
         }
         Command::Surf { listen, open } => surf_command(vault, listen, open).await,
+        Command::Mail { cmd } => mail_command(vault, cmd.unwrap_or(MailCmd::Inbox)).await,
+        Command::Ls { peer } => ls_command(vault, &peer).await,
+        Command::Get { peer, file, output } => get_command(vault, &peer, &file, output).await,
         Command::Doctor { listen } => doctor(vault, listen).await,
         Command::Id => show_id(vault),
     }
@@ -147,7 +199,8 @@ async fn up(vault: Vault, args: UpArgs) -> Result<()> {
     }
     // Remember that the operator picked this, so the hub's port-80 preference
     // does not quietly move the dashboard out from under them.
-    let port_was_chosen = args.port.is_some() || config.api_port != intraweb_core::config::DEFAULT_API_PORT;
+    let port_was_chosen =
+        args.port.is_some() || config.api_port != intraweb_core::config::DEFAULT_API_PORT;
     if let Some(port) = args.port {
         config.api_port = port;
     }
@@ -174,11 +227,29 @@ async fn up(vault: Vault, args: UpArgs) -> Result<()> {
 
     if minted {
         println!("Minted a new identity: {}", identity.fingerprint());
-        println!("Back up {} -- it is your name on every hub.\n", vault.root().display());
+        println!(
+            "Back up {} -- it is your name on every hub.\n",
+            vault.root().display()
+        );
     }
 
     let node = Node::start(&config, Arc::clone(&identity), Arc::clone(&store))
         .context("could not start discovery")?;
+
+    // Anything queued leaves as soon as its recipient turns up. This is the
+    // whole of store-and-forward: the sender keeps trying, nobody relays.
+    {
+        let store = Arc::clone(&store);
+        let roster = node.roster.clone();
+        let identity = Arc::clone(&identity);
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(Duration::from_secs(mail::OUTBOX_INTERVAL_SECS));
+            loop {
+                ticker.tick().await;
+                mail::deliver_pending(&store, &roster, &identity).await;
+            }
+        });
+    }
 
     let state = api::AppState {
         roster: node.roster.clone(),
@@ -192,13 +263,19 @@ async fn up(vault: Vault, args: UpArgs) -> Result<()> {
 
     // A hub tries port 80 so newcomers can type a bare hostname -- unless a
     // port was chosen, in which case that one is honored.
-    let (listener, port) =
-        api::bind(api::should_try_low_port(config.hub, port_was_chosen), config.api_port).await?;
+    let (listener, port) = api::bind(
+        api::should_try_low_port(config.hub, port_was_chosen),
+        config.api_port,
+    )
+    .await?;
     let where_to_go = if config.hub {
         format!("http://intranet.local{}", suffix(port))
     } else {
         format!("http://localhost{}", suffix(port))
     };
+
+    // Tell local commands where to find us, so they need not re-discover.
+    Runtime::new(port).save(&vault.runtime_path()).ok();
 
     if args.tui {
         let dashboard = tui::Dashboard::new(
@@ -215,11 +292,18 @@ async fn up(vault: Vault, args: UpArgs) -> Result<()> {
         server.abort();
     } else {
         println!("intraweb -- your neighborhood web");
-        println!("  you        {} ({})", config.sanitized_nickname(), identity.fingerprint());
+        println!(
+            "  you        {} ({})",
+            config.sanitized_nickname(),
+            identity.fingerprint()
+        );
         println!("  vault      {}", vault.root().display());
         println!("  serving    {}", site_dir.display());
         println!("  dashboard  {where_to_go}");
-        println!("  your site  {where_to_go}/~{}", config.sanitized_nickname());
+        println!(
+            "  your site  {where_to_go}/~{}",
+            config.sanitized_nickname()
+        );
         if config.hub {
             println!("  hosting    {}", config.hub_name);
         }
@@ -281,7 +365,12 @@ async fn surf_command(vault: Vault, listen: u64, open: Option<usize>) -> Result<
         return surf::open_in_browser(&site.url);
     }
 
-    let width = sites.iter().map(|s| s.nickname.chars().count()).max().unwrap_or(8).max(8);
+    let width = sites
+        .iter()
+        .map(|s| s.nickname.chars().count())
+        .max()
+        .unwrap_or(8)
+        .max(8);
     println!();
     for (index, site) in sites.iter().enumerate() {
         let marker = if site.is_hub { "*" } else { " " };
@@ -311,6 +400,270 @@ async fn surf_command(vault: Vault, listen: u64, open: Option<usize>) -> Result<
     }
     println!("Open one with: intraweb surf --open <number>");
     Ok(())
+}
+
+/// Get the current roster as cheaply as possible.
+///
+/// If a node is already running here, its dashboard already knows who is about,
+/// so ask it rather than spending seconds re-discovering the same network. Only
+/// when nothing is running do we listen for ourselves.
+async fn peers_now(
+    vault: &Vault,
+    config: &Arc<Config>,
+    identity: &Arc<Identity>,
+    store: &Arc<Mutex<Store>>,
+    listen: u64,
+) -> Result<Vec<Peer>> {
+    let local = std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST);
+    // A running node publishes the port it really bound; fall back to the
+    // configured one and then the clean-URL port a hub would have taken.
+    let running = Runtime::load(&vault.runtime_path()).map(|r| r.api_port);
+    let candidates: Vec<u16> = running.into_iter().chain([config.api_port, 80]).collect();
+
+    for port in candidates {
+        if let Ok(response) = http::get(local, port, "/api/peers", Duration::from_millis(400)).await
+            && response.is_success()
+            && let Ok(peers) = serde_json::from_str::<Vec<Peer>>(&response.body)
+        {
+            return Ok(peers);
+        }
+    }
+
+    let node = Node::observe(config, Arc::clone(identity), Arc::clone(store))
+        .context("could not listen for neighbors")?;
+    eprintln!("Looking for neighbors for {listen}s...");
+    tokio::time::sleep(Duration::from_secs(listen)).await;
+    let peers = node.roster.peers();
+    node.shutdown();
+    Ok(peers)
+}
+
+async fn mail_command(vault: Vault, cmd: MailCmd) -> Result<()> {
+    let (identity, config, _) = open_vault(&vault)?;
+    let store = Arc::new(Mutex::new(Store::open(&vault.db_path())?));
+    let config = Arc::new(config);
+
+    match cmd {
+        MailCmd::Send {
+            to,
+            subject,
+            message,
+        } => {
+            let body = match message {
+                Some(body) => body,
+                None => {
+                    use std::io::Read;
+                    let mut buf = String::new();
+                    std::io::stdin()
+                        .read_to_string(&mut buf)
+                        .context("could not read stdin")?;
+                    buf
+                }
+            };
+
+            let live = peers_now(&vault, &config, &identity, &store, 3).await?;
+            let recipient = mail::resolve_or_explain(&mail::addressable(&live, &store), &to)?;
+
+            let queued_id = mail::queue(
+                &store,
+                identity.peer_id(),
+                recipient.peer_id,
+                &subject,
+                &body,
+            )?;
+
+            // Try immediately; a running node keeps retrying if this misses.
+            let delivered = {
+                let sealed = intraweb_core::SignedMail::seal(
+                    intraweb_core::Mail::new(
+                        identity.peer_id(),
+                        recipient.peer_id,
+                        &subject,
+                        &body,
+                        now_secs(),
+                    ),
+                    &identity,
+                )?;
+                mail::deliver_one(&recipient, &sealed).await.is_ok()
+            };
+
+            if delivered {
+                // Mark the row we actually queued; picking "the newest pending"
+                // would grab the wrong one if two were queued in the same second.
+                if let Ok(store) = store.lock() {
+                    store.mark_delivered(queued_id, now_secs()).ok();
+                }
+                println!(
+                    "Delivered to {} ({}).",
+                    recipient.nickname, recipient.fingerprint
+                );
+            } else {
+                println!(
+                    "Queued for {} ({}). It will go as soon as they are reachable.",
+                    recipient.nickname, recipient.fingerprint
+                );
+            }
+            Ok(())
+        }
+
+        MailCmd::Inbox => {
+            let Ok(store) = store.lock() else {
+                anyhow::bail!("the mail store is busy");
+            };
+            let messages = store.inbox(50)?;
+            if messages.is_empty() {
+                println!("No mail.");
+                return Ok(());
+            }
+            for message in &messages {
+                let unread = if message.read_at.is_none() { "*" } else { " " };
+                println!(
+                    "{unread} {}  {}",
+                    message.peer_id.fingerprint(),
+                    if message.subject.is_empty() {
+                        "(no subject)"
+                    } else {
+                        &message.subject
+                    },
+                );
+                for line in message.body.lines() {
+                    println!("      {line}");
+                }
+                println!();
+            }
+            store.mark_all_read(now_secs())?;
+            Ok(())
+        }
+
+        MailCmd::Outbox => {
+            let Ok(store) = store.lock() else {
+                anyhow::bail!("the mail store is busy");
+            };
+            let messages = store.outbox(50)?;
+            if messages.is_empty() {
+                println!("Nothing sent yet.");
+                return Ok(());
+            }
+            for message in &messages {
+                let state = if message.delivered_at.is_some() {
+                    "sent  "
+                } else {
+                    "queued"
+                };
+                println!(
+                    "{state}  {}  {}",
+                    message.peer_id.fingerprint(),
+                    if message.subject.is_empty() {
+                        "(no subject)"
+                    } else {
+                        &message.subject
+                    },
+                );
+            }
+            Ok(())
+        }
+    }
+}
+
+async fn ls_command(vault: Vault, query: &str) -> Result<()> {
+    let (identity, config, _) = open_vault(&vault)?;
+    let store = Arc::new(Mutex::new(Store::open(&vault.db_path())?));
+    let config = Arc::new(config);
+
+    let peers = peers_now(&vault, &config, &identity, &store, 3).await?;
+    let peer = mail::resolve_or_explain(&peers, query)?;
+    let addr = peer
+        .preferred_addr()
+        .context("that peer has no address yet")?;
+
+    let response = http::get(addr, peer.api_port, "/api/files", Duration::from_secs(5)).await?;
+    anyhow::ensure!(
+        response.is_success(),
+        "{} answered HTTP {}",
+        peer.nickname,
+        response.status
+    );
+
+    let files: Vec<serde_json::Value> = serde_json::from_str(&response.body)
+        .context("that peer sent a file list we could not read")?;
+    if files.is_empty() {
+        println!("{} is not sharing any files.", peer.nickname);
+        return Ok(());
+    }
+
+    println!("{} ({})", peer.nickname, peer.fingerprint);
+    for file in &files {
+        let path = file.get("path").and_then(|v| v.as_str()).unwrap_or("?");
+        let size = file.get("size").and_then(|v| v.as_u64()).unwrap_or(0);
+        println!("  {:>10}  {path}", human_size(size));
+    }
+    println!("\nFetch one with: intraweb get {} <path>", peer.nickname);
+    Ok(())
+}
+
+async fn get_command(vault: Vault, query: &str, file: &str, output: Option<PathBuf>) -> Result<()> {
+    let (identity, config, _) = open_vault(&vault)?;
+    let store = Arc::new(Mutex::new(Store::open(&vault.db_path())?));
+    let config = Arc::new(config);
+
+    let peers = peers_now(&vault, &config, &identity, &store, 3).await?;
+    let peer = mail::resolve_or_explain(&peers, query)?;
+    let addr = peer
+        .preferred_addr()
+        .context("that peer has no address yet")?;
+
+    let destination =
+        output.unwrap_or_else(|| PathBuf::from(file.rsplit('/').next().unwrap_or("download")));
+    let resuming = tokio::fs::metadata(&destination)
+        .await
+        .map(|m| m.len())
+        .unwrap_or(0);
+    if resuming > 0 {
+        println!("Resuming at {}.", human_size(resuming));
+    }
+
+    let path = format!("/files/{file}");
+    let mut last_report = 0u64;
+    let written = http::stream_to_file(
+        addr,
+        peer.api_port,
+        &path,
+        &destination,
+        Duration::from_secs(30),
+        |written, expected| {
+            // Report on the way past each megabyte rather than every chunk.
+            if written - last_report < 1024 * 1024 {
+                return;
+            }
+            last_report = written;
+            match expected {
+                Some(total) if total > 0 => {
+                    eprint!("\r  {} / {}  ", human_size(written), human_size(total))
+                }
+                _ => eprint!("\r  {}  ", human_size(written)),
+            }
+        },
+    )
+    .await?;
+
+    eprintln!();
+    println!("Saved {} to {}", human_size(written), destination.display());
+    Ok(())
+}
+
+fn human_size(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
+    let mut value = bytes as f64;
+    let mut unit = 0;
+    while value >= 1024.0 && unit < UNITS.len() - 1 {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{bytes} B")
+    } else {
+        format!("{value:.1} {}", UNITS[unit])
+    }
 }
 
 async fn doctor(vault: Vault, listen: u64) -> Result<()> {
@@ -356,12 +709,20 @@ fn show_id(vault: Vault) -> Result<()> {
 /// Omit the port from URLs when it is the default, so the printed address is
 /// the one a person would actually type.
 fn suffix(port: u16) -> String {
-    if port == 80 { String::new() } else { format!(":{port}") }
+    if port == 80 {
+        String::new()
+    } else {
+        format!(":{port}")
+    }
 }
 
 fn init_logging() {
     use tracing_subscriber::{EnvFilter, fmt};
     let filter = EnvFilter::try_from_env("INTRAWEB_LOG")
         .unwrap_or_else(|_| EnvFilter::new("intraweb_net=info,intraweb_cli=info,warn"));
-    fmt().with_env_filter(filter).with_target(false).compact().init();
+    fmt()
+        .with_env_filter(filter)
+        .with_target(false)
+        .compact()
+        .init();
 }

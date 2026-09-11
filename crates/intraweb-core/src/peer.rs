@@ -47,7 +47,7 @@ impl TrustState {
 }
 
 /// A peer as currently seen on the network.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Peer {
     pub peer_id: PeerId,
     /// Short digest for reading aloud when verifying out of band.
@@ -55,7 +55,6 @@ pub struct Peer {
     pub nickname: String,
     pub addrs: Vec<IpAddr>,
     pub api_port: u16,
-    pub transport_port: u16,
     /// True when this peer offers itself as a meeting point.
     pub is_hub: bool,
     pub hub_name: Option<String>,
@@ -84,7 +83,10 @@ impl Peer {
             IpAddr::V6(v6) => format!("[{v6}]"),
             IpAddr::V4(v4) => v4.to_string(),
         };
-        Some(format!("http://{host}:{}/~{}", self.api_port, self.nickname))
+        Some(format!(
+            "http://{host}:{}/~{}",
+            self.api_port, self.nickname
+        ))
     }
 
     pub fn is_stale(&self, now: u64, timeout_secs: u64) -> bool {
@@ -114,7 +116,6 @@ mod tests {
             nickname: "ben".into(),
             addrs,
             api_port: 8420,
-            transport_port: 8421,
             is_hub: false,
             hub_name: None,
             source: DiscoverySource::Mdns,
@@ -130,14 +131,20 @@ mod tests {
             IpAddr::V6(Ipv6Addr::LOCALHOST),
             IpAddr::V4(Ipv4Addr::new(192, 168, 1, 20)),
         ]);
-        assert_eq!(peer.preferred_addr(), Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 20))));
+        assert_eq!(
+            peer.preferred_addr(),
+            Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 20)))
+        );
     }
 
     #[test]
     fn falls_back_to_ipv6_when_alone() {
         let peer = sample(vec![IpAddr::V6(Ipv6Addr::LOCALHOST)]);
         assert_eq!(peer.preferred_addr(), Some(IpAddr::V6(Ipv6Addr::LOCALHOST)));
-        assert!(peer.site_url().unwrap().contains("[::1]"), "v6 hosts need brackets");
+        assert!(
+            peer.site_url().unwrap().contains("[::1]"),
+            "v6 hosts need brackets"
+        );
     }
 
     #[test]
@@ -155,7 +162,13 @@ mod tests {
 
     #[test]
     fn discovery_sources_merge_into_both() {
-        assert_eq!(DiscoverySource::Mdns.merge(DiscoverySource::Mdns), DiscoverySource::Mdns);
-        assert_eq!(DiscoverySource::Mdns.merge(DiscoverySource::Beacon), DiscoverySource::Both);
+        assert_eq!(
+            DiscoverySource::Mdns.merge(DiscoverySource::Mdns),
+            DiscoverySource::Mdns
+        );
+        assert_eq!(
+            DiscoverySource::Mdns.merge(DiscoverySource::Beacon),
+            DiscoverySource::Both
+        );
     }
 }

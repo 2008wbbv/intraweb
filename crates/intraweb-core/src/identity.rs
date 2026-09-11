@@ -69,8 +69,9 @@ impl PeerId {
     /// keys. On an open LAN we assume packets are hostile until proven otherwise.
     pub fn verify(&self, message: &[u8], signature: &[u8]) -> Result<()> {
         let key = VerifyingKey::from_bytes(&self.0).context("malformed public key")?;
-        let sig_bytes: [u8; SIG_LEN] =
-            signature.try_into().map_err(|_| anyhow::anyhow!("signature must be {SIG_LEN} bytes"))?;
+        let sig_bytes: [u8; SIG_LEN] = signature
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("signature must be {SIG_LEN} bytes"))?;
         key.verify_strict(message, &Signature::from_bytes(&sig_bytes))
             .context("signature did not verify")
     }
@@ -114,9 +115,12 @@ impl Identity {
     /// library currently tracks.
     pub fn generate() -> Result<Self> {
         let mut seed = [0u8; SEED_LEN];
-        getrandom::fill(&mut seed)
-            .map_err(|e| anyhow::anyhow!("could not read entropy from the operating system: {e}"))?;
-        Ok(Self { signing: SigningKey::from_bytes(&seed) })
+        getrandom::fill(&mut seed).map_err(|e| {
+            anyhow::anyhow!("could not read entropy from the operating system: {e}")
+        })?;
+        Ok(Self {
+            signing: SigningKey::from_bytes(&seed),
+        })
     }
 
     pub fn peer_id(&self) -> PeerId {
@@ -153,9 +157,14 @@ impl Identity {
             .find(|line| !line.is_empty() && !line.starts_with('#'))
             .context("identity file contains no key")?;
         let Some(seed) = hex::decode_array::<SEED_LEN>(seed_hex) else {
-            bail!("identity at {} is corrupt: expected {SEED_LEN} hex-encoded bytes", path.display());
+            bail!(
+                "identity at {} is corrupt: expected {SEED_LEN} hex-encoded bytes",
+                path.display()
+            );
         };
-        Ok(Self { signing: SigningKey::from_bytes(&seed) })
+        Ok(Self {
+            signing: SigningKey::from_bytes(&seed),
+        })
     }
 
     /// Write the identity, readable only by its owner.

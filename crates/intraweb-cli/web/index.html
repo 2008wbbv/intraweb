@@ -36,6 +36,28 @@
     <div id="peers" class="grid"></div>
   </section>
 
+  <section aria-labelledby="mail-heading">
+    <div class="section-head">
+      <h2 id="mail-heading">Mail</h2>
+      <span class="count" id="mail-count"></span>
+    </div>
+    <p class="hint">Messages are signed with your key and go straight to the
+       recipient's node. Anything addressed to somebody out of range waits in
+       your outbox until they turn up.</p>
+    <form id="compose" autocomplete="off">
+      <div class="row">
+        <input id="compose-to" name="to" placeholder="nickname or fingerprint" required>
+        <input id="compose-subject" name="subject" placeholder="subject">
+      </div>
+      <textarea id="compose-body" name="body" rows="3" placeholder="message"></textarea>
+      <div class="row end">
+        <span id="compose-result" class="hint"></span>
+        <button type="submit">Send</button>
+      </div>
+    </form>
+    <div id="mail"></div>
+  </section>
+
   <section aria-labelledby="doctor-heading">
     <div class="section-head">
       <h2 id="doctor-heading">Network check</h2>

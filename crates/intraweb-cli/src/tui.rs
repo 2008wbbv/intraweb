@@ -44,7 +44,14 @@ impl Dashboard {
         store: Arc<Mutex<Store>>,
         config: Arc<Config>,
     ) -> Self {
-        Self { roster, identity, store, config, selected: ListState::default(), notice: None }
+        Self {
+            roster,
+            identity,
+            store,
+            config,
+            selected: ListState::default(),
+            notice: None,
+        }
     }
 
     /// Take over the terminal until the operator quits. Blocking by design;
@@ -64,13 +71,19 @@ impl Dashboard {
             if !event::poll(TICK)? {
                 continue;
             }
-            let Event::Key(key) = event::read()? else { continue };
+            let Event::Key(key) = event::read()? else {
+                continue;
+            };
             if key.kind != KeyEventKind::Press {
                 continue;
             }
             match key.code {
                 KeyCode::Char('q') | KeyCode::Esc => return Ok(()),
-                KeyCode::Char('c') if key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) => {
+                KeyCode::Char('c')
+                    if key
+                        .modifiers
+                        .contains(crossterm::event::KeyModifiers::CONTROL) =>
+                {
                     return Ok(());
                 }
                 KeyCode::Down | KeyCode::Char('j') => self.move_selection(1, peers.len()),
@@ -102,20 +115,23 @@ impl Dashboard {
             return;
         };
         self.notice = match store.mark_verified(peer.peer_id) {
-            Ok(true) => Some(format!("Marked {} as verified.", peer.nickname)),
+            Ok(true) => {
+                // Show it at once instead of waiting for the next write-through.
+                self.roster.note_verified(peer.peer_id);
+                Some(format!("Marked {} as verified.", peer.nickname))
+            }
             Ok(_) => Some("That peer is not in the keyring yet.".into()),
             Err(err) => Some(format!("Could not verify: {err}")),
         };
     }
 
     fn draw(&mut self, frame: &mut Frame, peers: &[Peer]) {
-        let [header, body, footer] =
-            Layout::vertical([
-                Constraint::Length(HEADER_HEIGHT),
-                Constraint::Min(3),
-                Constraint::Length(3),
-            ])
-                .areas(frame.area());
+        let [header, body, footer] = Layout::vertical([
+            Constraint::Length(HEADER_HEIGHT),
+            Constraint::Min(3),
+            Constraint::Length(3),
+        ])
+        .areas(frame.area());
 
         frame.render_widget(self.header(peers), header);
         self.draw_roster(frame, body, peers);
@@ -130,12 +146,20 @@ impl Dashboard {
             "peer".to_string()
         };
 
+        let unread = self
+            .store
+            .lock()
+            .ok()
+            .and_then(|store| store.unread_count().ok())
+            .unwrap_or(0);
+
         Paragraph::new(header_lines(
             &self.config.sanitized_nickname(),
             &role,
             &self.identity.fingerprint(),
             peers.len(),
             hubs,
+            unread,
         ))
         .block(Block::bordered())
     }
@@ -183,24 +207,52 @@ fn header_lines(
     fingerprint: &str,
     peers: usize,
     hubs: usize,
+    unread: u64,
 ) -> Vec<Line<'static>> {
     vec![
         Line::from(vec![
             Span::styled(
                 "intraweb",
-                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
             ),
-            Span::styled("  your neighborhood web", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                "  your neighborhood web",
+                Style::default().fg(Color::DarkGray),
+            ),
         ]),
         Line::from(vec![
-            Span::styled(nickname.to_string(), Style::default().add_modifier(Modifier::BOLD)),
+            Span::styled(
+                nickname.to_string(),
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
             Span::raw(format!("  {role}  ")),
-            Span::styled(fingerprint.to_string(), Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                fingerprint.to_string(),
+                Style::default().fg(Color::DarkGray),
+            ),
         ]),
-        Line::from(Span::styled(
-            format!("{} neighbor(s) online, {hubs} hub(s) in range", peers.saturating_sub(hubs)),
-            Style::default().fg(Color::DarkGray),
-        )),
+        Line::from(vec![
+            Span::styled(
+                format!(
+                    "{} neighbor(s) online, {hubs} hub(s) in range",
+                    peers.saturating_sub(hubs)
+                ),
+                Style::default().fg(Color::DarkGray),
+            ),
+            // Only worth the space when there is actually something to read.
+            Span::styled(
+                if unread > 0 {
+                    format!("   {unread} unread")
+                } else {
+                    String::new()
+                },
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]),
     ]
 }
 
@@ -230,7 +282,9 @@ fn roster_row(peer: &Peer, now: u64) -> ListItem<'static> {
     };
 
     let label_style = if peer.is_hub {
-        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD)
     } else {
         Style::default().add_modifier(Modifier::BOLD)
     };
@@ -244,7 +298,10 @@ fn roster_row(peer: &Peer, now: u64) -> ListItem<'static> {
         Span::styled(marker, marker_style),
         Span::raw(" "),
         Span::styled(pad(&peer.nickname, NICK_WIDTH), label_style),
-        Span::styled(pad(if peer.is_hub { "[hub]" } else { "" }, 7), Style::default().fg(Color::Cyan)),
+        Span::styled(
+            pad(if peer.is_hub { "[hub]" } else { "" }, 7),
+            Style::default().fg(Color::Cyan),
+        ),
         Span::styled(
             format!(
                 "{}{}  {}s ago",
@@ -258,7 +315,10 @@ fn roster_row(peer: &Peer, now: u64) -> ListItem<'static> {
 
     if peer.trust == TrustState::NicknameConflict {
         lines.push(Line::from(Span::styled(
-            format!("    not the \"{}\" you met before -- different key, same name", peer.nickname),
+            format!(
+                "    not the \"{}\" you met before -- different key, same name",
+                peer.nickname
+            ),
             Style::default().fg(Color::Red),
         )));
     }
@@ -274,7 +334,7 @@ mod tests {
     /// lines, so "N neighbor(s) online" was clipped away with no error anywhere.
     #[test]
     fn the_header_block_is_tall_enough_for_what_it_draws() {
-        let drawn = header_lines("carol", "peer", "844c-8e7b-9dfd-5d0a", 3, 1);
+        let drawn = header_lines("carol", "peer", "844c-8e7b-9dfd-5d0a", 3, 1, 0);
 
         assert_eq!(drawn.len(), HEADER_LINES);
         assert!(
@@ -285,9 +345,12 @@ mod tests {
 
     #[test]
     fn the_counts_line_excludes_hubs_from_the_neighbor_total() {
-        let drawn = header_lines("carol", "peer", "fp", 3, 1);
-        let counts: String =
-            drawn[2].spans.iter().map(|span| span.content.as_ref()).collect();
+        let drawn = header_lines("carol", "peer", "fp", 3, 1, 0);
+        let counts: String = drawn[2]
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect();
 
         assert_eq!(counts, "2 neighbor(s) online, 1 hub(s) in range");
     }
@@ -296,11 +359,31 @@ mod tests {
     fn the_counts_line_never_underflows() {
         // More hubs than peers should be impossible, but saturating here is
         // cheaper than a panic in a render loop.
-        let drawn = header_lines("carol", "peer", "fp", 0, 2);
-        let counts: String =
-            drawn[2].spans.iter().map(|span| span.content.as_ref()).collect();
+        let drawn = header_lines("carol", "peer", "fp", 0, 2, 0);
+        let counts: String = drawn[2]
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect();
 
         assert!(counts.starts_with("0 neighbor(s)"));
+    }
+
+    #[test]
+    fn unread_mail_is_announced_only_when_there_is_some() {
+        let quiet: String = header_lines("carol", "peer", "fp", 1, 0, 0)[2]
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect();
+        assert!(!quiet.contains("unread"), "an empty inbox needs no mention");
+
+        let waiting: String = header_lines("carol", "peer", "fp", 1, 0, 3)[2]
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect();
+        assert!(waiting.contains("3 unread"));
     }
 
     #[test]

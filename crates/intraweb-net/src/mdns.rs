@@ -40,8 +40,13 @@ impl MdnsNode {
         let host_name = if is_hub {
             format!("{HUB_HOSTNAME}.local.")
         } else {
-            let short: String =
-                presence.peer_id.fingerprint().chars().filter(|c| *c != '-').take(8).collect();
+            let short: String = presence
+                .peer_id
+                .fingerprint()
+                .chars()
+                .filter(|c| *c != '-')
+                .take(8)
+                .collect();
             format!("{}-{short}.local.", presence.nickname)
         };
 
@@ -61,10 +66,15 @@ impl MdnsNode {
         .context("could not build the mDNS service record")?;
 
         let fullname = service.get_fullname().to_string();
-        daemon.register(service).context("could not register over mDNS")?;
+        daemon
+            .register(service)
+            .context("could not register over mDNS")?;
         tracing::info!(%fullname, %host_name, "announcing over mDNS");
 
-        Ok(Self { daemon, fullname: Some(fullname) })
+        Ok(Self {
+            daemon,
+            fullname: Some(fullname),
+        })
     }
 
     /// Browse without announcing.
@@ -74,7 +84,10 @@ impl MdnsNode {
     /// under the same key.
     pub fn observer() -> Result<Self> {
         let daemon = ServiceDaemon::new().context("could not start the mDNS responder")?;
-        Ok(Self { daemon, fullname: None })
+        Ok(Self {
+            daemon,
+            fullname: None,
+        })
     }
 
     /// Stream peers as mDNS resolves them.
@@ -82,7 +95,10 @@ impl MdnsNode {
     /// The responder is synchronous, so a dedicated thread bridges its channel
     /// into async-land rather than blocking a runtime worker indefinitely.
     pub fn browse(&self) -> Result<mpsc::Receiver<MdnsSighting>> {
-        let events = self.daemon.browse(SERVICE_TYPE).context("could not browse for peers")?;
+        let events = self
+            .daemon
+            .browse(SERVICE_TYPE)
+            .context("could not browse for peers")?;
         let (tx, rx) = mpsc::channel(64);
 
         std::thread::Builder::new()
@@ -97,10 +113,20 @@ impl MdnsNode {
                         tracing::debug!(name = %service.fullname, "ignoring unreadable presence");
                         continue;
                     };
-                    let addrs =
-                        service.addresses.iter().map(|scoped| scoped.to_ip_addr()).collect();
+                    let addrs = service
+                        .addresses
+                        .iter()
+                        .map(|scoped| scoped.to_ip_addr())
+                        .collect();
 
-                    if tx.blocking_send(MdnsSighting { presence, signature, addrs }).is_err() {
+                    if tx
+                        .blocking_send(MdnsSighting {
+                            presence,
+                            signature,
+                            addrs,
+                        })
+                        .is_err()
+                    {
                         break; // The daemon shut down; stop bridging.
                     }
                 }
@@ -127,10 +153,15 @@ mod tests {
     #[test]
     fn hub_and_peer_hostnames_differ_predictably() {
         let id = Identity::generate().unwrap();
-        let presence = Presence::new(&id, "ben", 8420, 8421, false, "basecamp");
+        let presence = Presence::new(&id, "ben", 8420, false, "basecamp");
 
-        let short: String =
-            presence.peer_id.fingerprint().chars().filter(|c| *c != '-').take(8).collect();
+        let short: String = presence
+            .peer_id
+            .fingerprint()
+            .chars()
+            .filter(|c| *c != '-')
+            .take(8)
+            .collect();
 
         // A peer's name is derived from its key, so two "ben"s cannot collide.
         assert_eq!(short.len(), 8);

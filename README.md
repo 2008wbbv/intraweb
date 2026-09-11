@@ -56,6 +56,10 @@ intraweb up --hub --hub-name oak   # host a hub at intranet.local
 intraweb up --tui                  # same thing, in the terminal
 intraweb serve ./photos            # publish a folder to the neighborhood
 intraweb surf                      # see what the neighbors are publishing
+intraweb mail send bob -m "hi"     # write to a neighbor
+intraweb mail                      # read what you have been sent
+intraweb ls bob                    # what is bob sharing?
+intraweb get bob maps/ridge.pdf    # fetch it (resumes if interrupted)
 intraweb doctor                    # why can't I see anyone?
 intraweb id                        # my fingerprint, for verifying in person
 ```
@@ -134,6 +138,39 @@ to theirs. A neighbor that is announcing but not answering is listed as such
 instead of being hidden, and a name that has changed keys carries a warning with
 the fingerprint you need to tell the two apart.
 
+## Mail
+
+```sh
+intraweb mail send alice -s "fuel drop" -m "Thursday 0600."
+intraweb mail            # inbox
+intraweb mail outbox     # including anything still queued
+```
+
+Every message is signed with your key, so the sender cannot be forged, and goes
+straight to the recipient's node. Nothing passes through a hub.
+
+Addressing is by **key**, not by name. You may type a nickname and it will be
+resolved, but if two keys answer to that nickname the send is refused and you
+are shown both fingerprints to choose between — picking one for you would be a
+guess about the thing that matters most.
+
+Writing to somebody who is not around is normal: the message waits in your
+outbox and leaves the moment they appear. You can address a public key you have
+never seen, so a key written on paper is enough to write to someone.
+
+## Files
+
+```sh
+intraweb ls alice                       # what alice is sharing
+intraweb get alice maps/survey.tif      # fetch it
+```
+
+Downloads resume. If a transfer dies at 400 MB, running the same command again
+asks for the rest rather than starting over, and nothing is ever held in memory,
+so file size does not decide whether a transfer succeeds.
+
+Anything you drop in your vault's `files/` folder is what neighbors see here.
+
 ## Trust
 
 There are no passwords, and no certificate authority — neither would mean much
@@ -171,9 +208,12 @@ so many networks quietly break one of them.
 
 ## Status
 
-P0 is done: discovery, identity, the roster, both dashboards, diagnostics,
-`serve`, and `surf`. Mail, publishing from the dashboard, and direct file
-transfer are next — see `NOTES.md` for the plan and the open questions.
+Working today: discovery, portable identity, the roster, the web and terminal
+dashboards, diagnostics, `serve`, `surf`, signed store-and-forward mail, and
+resumable file transfer.
+
+Still to come: publishing a site from the dashboard, and attaching files to
+mail. See `NOTES.md` for the plan and what is still undecided.
 
 ## License
 

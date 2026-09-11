@@ -124,3 +124,27 @@ footer {
   .masthead { flex-direction: column; align-items: flex-start; }
   .me { text-align: left; }
 }
+
+form#compose { margin: 0 0 1.25rem; display: grid; gap: .5rem; }
+form#compose .row { display: flex; gap: .5rem; flex-wrap: wrap; }
+form#compose .row.end { justify-content: flex-end; align-items: center; }
+form#compose .row.end .hint { margin: 0; flex: 1; }
+input, textarea {
+  font: inherit; font-size: .9rem; flex: 1; min-width: 8rem;
+  padding: .4rem .55rem; border-radius: 6px; resize: vertical;
+  border: 1px solid var(--rule); background: var(--card); color: var(--ink);
+}
+input:focus, textarea:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+
+.letter {
+  border: 1px solid var(--rule); border-left: 3px solid var(--rule);
+  border-radius: 8px; background: var(--card);
+  padding: .65rem .8rem; margin-bottom: .5rem;
+}
+.letter.unread { border-left-color: var(--accent); }
+.letter .subject { font-weight: 600; }
+.letter .from {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: .75rem; color: var(--muted);
+}
+.letter .body { margin-top: .4rem; white-space: pre-wrap; font-size: .9rem; }

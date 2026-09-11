@@ -20,15 +20,72 @@ pub enum Sighting {
     SelfEcho,
 }
 
+/// How often a still-present peer's sighting is written through to the keyring.
+///
+/// Beacons arrive every couple of seconds, and writing each one meant a SQLite
+/// UPDATE per peer per beacon -- pointless lock traffic, and pointless flash
+/// wear on the SD card a field node boots from. The roster already holds the
+/// live `last_seen`; the durable copy only needs to be roughly right.
+pub const PERSIST_INTERVAL_SECS: u64 = 60;
+
 pub struct PeerRegistry {
     self_id: PeerId,
     timeout_secs: u64,
     peers: HashMap<PeerId, Peer>,
+    /// Nickname and time of the last write-through, per peer.
+    persisted: HashMap<PeerId, (String, u64)>,
 }
 
 impl PeerRegistry {
     pub fn new(self_id: PeerId, timeout_secs: u64) -> Self {
-        Self { self_id, timeout_secs, peers: HashMap::new() }
+        Self {
+            self_id,
+            timeout_secs,
+            peers: HashMap::new(),
+            persisted: HashMap::new(),
+        }
+    }
+
+    /// The trust we already hold for a peer, when this sighting need not reach
+    /// the keyring.
+    ///
+    /// Returns `None` -- meaning "go and write" -- whenever the durable record
+    /// could be wrong: an unknown key, a changed nickname (which is how an
+    /// impersonation attempt shows up), or a write-through that is simply due.
+    pub fn cached_trust(&self, peer_id: PeerId, nickname: &str, now: u64) -> Option<TrustState> {
+        let peer = self.peers.get(&peer_id)?;
+        let (persisted_nick, persisted_at) = self.persisted.get(&peer_id)?;
+
+        if persisted_nick != nickname {
+            return None;
+        }
+        if now.saturating_sub(*persisted_at) >= PERSIST_INTERVAL_SECS {
+            return None;
+        }
+        Some(peer.trust)
+    }
+
+    /// Apply a trust decision made locally, right now.
+    ///
+    /// Throttling write-through means the next sighting would otherwise reuse
+    /// the cached trust and ignore what the operator just did, leaving a
+    /// verified peer looking unverified for up to a minute. Updating in place
+    /// and dropping the bookkeeping makes it immediate instead.
+    pub fn set_trust(&mut self, peer_id: PeerId, trust: TrustState) -> bool {
+        let Some(peer) = self.peers.get_mut(&peer_id) else {
+            return false;
+        };
+        // A raised conflict warning still outranks anything else.
+        if peer.trust != TrustState::NicknameConflict {
+            peer.trust = trust;
+        }
+        self.persisted.remove(&peer_id);
+        true
+    }
+
+    /// Note that this peer's sighting reached the keyring.
+    pub fn mark_persisted(&mut self, peer_id: PeerId, nickname: &str, now: u64) {
+        self.persisted.insert(peer_id, (nickname.to_string(), now));
     }
 
     /// Fold a verified presence record into the roster.
@@ -51,7 +108,6 @@ impl PeerRegistry {
             Some(existing) => {
                 existing.nickname = presence.nickname.clone();
                 existing.api_port = presence.api_port;
-                existing.transport_port = presence.transport_port;
                 existing.is_hub = presence.is_hub;
                 existing.hub_name = hub_name(presence);
                 existing.source = existing.source.merge(source);
@@ -77,7 +133,6 @@ impl PeerRegistry {
                         nickname: presence.nickname.clone(),
                         addrs,
                         api_port: presence.api_port,
-                        transport_port: presence.transport_port,
                         is_hub: presence.is_hub,
                         hub_name: hub_name(presence),
                         source,
@@ -103,6 +158,9 @@ impl PeerRegistry {
             .collect();
         for peer in &departed {
             self.peers.remove(&peer.peer_id);
+            // Otherwise the map grows for every peer that ever passed through,
+            // and a returning peer would skip its write-through.
+            self.persisted.remove(&peer.peer_id);
         }
         departed
     }
@@ -123,7 +181,10 @@ impl PeerRegistry {
     /// Every hub currently reachable. Joining all of them at once is the point:
     /// one vault, many neighborhoods.
     pub fn hubs(&self) -> Vec<Peer> {
-        self.snapshot().into_iter().filter(|peer| peer.is_hub).collect()
+        self.snapshot()
+            .into_iter()
+            .filter(|peer| peer.is_hub)
+            .collect()
     }
 
     pub fn len(&self) -> usize {
@@ -150,7 +211,7 @@ mod tests {
     }
 
     fn presence(id: &Identity, nick: &str, is_hub: bool) -> Presence {
-        Presence::new(id, nick, 8420, 8421, is_hub, "basecamp")
+        Presence::new(id, nick, 8420, is_hub, "basecamp")
     }
 
     fn registry() -> (PeerRegistry, Identity) {
@@ -164,8 +225,20 @@ mod tests {
         let alice = Identity::generate().unwrap();
         let p = presence(&alice, "alice", false);
 
-        let first = reg.record(&p, vec![addr(10)], DiscoverySource::Mdns, TrustState::New, 100);
-        let second = reg.record(&p, vec![addr(10)], DiscoverySource::Mdns, TrustState::Known, 110);
+        let first = reg.record(
+            &p,
+            vec![addr(10)],
+            DiscoverySource::Mdns,
+            TrustState::New,
+            100,
+        );
+        let second = reg.record(
+            &p,
+            vec![addr(10)],
+            DiscoverySource::Mdns,
+            TrustState::Known,
+            110,
+        );
 
         assert_eq!(first, Sighting::Arrived);
         assert_eq!(second, Sighting::Refreshed);
@@ -177,7 +250,13 @@ mod tests {
         let (mut reg, me) = registry();
         let mine = presence(&me, "me", false);
 
-        let outcome = reg.record(&mine, vec![addr(5)], DiscoverySource::Beacon, TrustState::New, 100);
+        let outcome = reg.record(
+            &mine,
+            vec![addr(5)],
+            DiscoverySource::Beacon,
+            TrustState::New,
+            100,
+        );
 
         assert_eq!(outcome, Sighting::SelfEcho);
         assert!(reg.is_empty(), "we must not list ourselves as a neighbor");
@@ -189,8 +268,20 @@ mod tests {
         let alice = Identity::generate().unwrap();
         let p = presence(&alice, "alice", false);
 
-        reg.record(&p, vec![addr(10)], DiscoverySource::Mdns, TrustState::New, 100);
-        reg.record(&p, vec![addr(10)], DiscoverySource::Beacon, TrustState::Known, 101);
+        reg.record(
+            &p,
+            vec![addr(10)],
+            DiscoverySource::Mdns,
+            TrustState::New,
+            100,
+        );
+        reg.record(
+            &p,
+            vec![addr(10)],
+            DiscoverySource::Beacon,
+            TrustState::Known,
+            101,
+        );
 
         assert_eq!(reg.snapshot()[0].source, DiscoverySource::Both);
     }
@@ -201,8 +292,20 @@ mod tests {
         let alice = Identity::generate().unwrap();
         let p = presence(&alice, "alice", false);
 
-        reg.record(&p, vec![addr(10)], DiscoverySource::Mdns, TrustState::New, 100);
-        reg.record(&p, vec![addr(10), addr(11)], DiscoverySource::Mdns, TrustState::Known, 101);
+        reg.record(
+            &p,
+            vec![addr(10)],
+            DiscoverySource::Mdns,
+            TrustState::New,
+            100,
+        );
+        reg.record(
+            &p,
+            vec![addr(10), addr(11)],
+            DiscoverySource::Mdns,
+            TrustState::Known,
+            101,
+        );
 
         assert_eq!(reg.snapshot()[0].addrs, vec![addr(10), addr(11)]);
     }
@@ -213,8 +316,20 @@ mod tests {
         let mallory = Identity::generate().unwrap();
         let p = presence(&mallory, "alice", false);
 
-        reg.record(&p, vec![addr(66)], DiscoverySource::Mdns, TrustState::NicknameConflict, 100);
-        reg.record(&p, vec![addr(66)], DiscoverySource::Mdns, TrustState::Known, 110);
+        reg.record(
+            &p,
+            vec![addr(66)],
+            DiscoverySource::Mdns,
+            TrustState::NicknameConflict,
+            100,
+        );
+        reg.record(
+            &p,
+            vec![addr(66)],
+            DiscoverySource::Mdns,
+            TrustState::Known,
+            110,
+        );
 
         assert_eq!(
             reg.snapshot()[0].trust,
@@ -224,13 +339,130 @@ mod tests {
     }
 
     #[test]
+    fn an_unknown_peer_always_reaches_the_keyring() {
+        let (reg, _me) = registry();
+        let alice = Identity::generate().unwrap();
+        assert_eq!(reg.cached_trust(alice.peer_id(), "alice", 100), None);
+    }
+
+    #[test]
+    fn a_settled_peer_skips_the_write_until_the_interval_is_up() {
+        let (mut reg, _me) = registry();
+        let alice = Identity::generate().unwrap();
+        let p = presence(&alice, "alice", false);
+
+        reg.record(&p, vec![], DiscoverySource::Mdns, TrustState::Known, 100);
+        reg.mark_persisted(alice.peer_id(), "alice", 100);
+
+        // A beacon two seconds later costs nothing.
+        assert_eq!(
+            reg.cached_trust(alice.peer_id(), "alice", 102),
+            Some(TrustState::Known)
+        );
+        // Once the interval passes, write through again.
+        assert_eq!(
+            reg.cached_trust(alice.peer_id(), "alice", 100 + PERSIST_INTERVAL_SECS),
+            None
+        );
+    }
+
+    #[test]
+    fn a_changed_nickname_always_reaches_the_keyring() {
+        // This is where impersonation surfaces, so it must never be skipped.
+        let (mut reg, _me) = registry();
+        let alice = Identity::generate().unwrap();
+
+        reg.record(
+            &presence(&alice, "alice", false),
+            vec![],
+            DiscoverySource::Mdns,
+            TrustState::Known,
+            100,
+        );
+        reg.mark_persisted(alice.peer_id(), "alice", 100);
+
+        assert_eq!(reg.cached_trust(alice.peer_id(), "alice-laptop", 101), None);
+    }
+
+    #[test]
+    fn a_returning_peer_writes_through_again() {
+        let (mut reg, _me) = registry();
+        let alice = Identity::generate().unwrap();
+        let p = presence(&alice, "alice", false);
+
+        reg.record(&p, vec![], DiscoverySource::Mdns, TrustState::Known, 100);
+        reg.mark_persisted(alice.peer_id(), "alice", 100);
+        reg.sweep(200);
+
+        reg.record(&p, vec![], DiscoverySource::Mdns, TrustState::Known, 201);
+        assert_eq!(
+            reg.cached_trust(alice.peer_id(), "alice", 202),
+            None,
+            "bookkeeping was dropped"
+        );
+    }
+
+    #[test]
+    fn verifying_a_peer_shows_up_immediately_not_a_minute_later() {
+        let (mut reg, _me) = registry();
+        let alice = Identity::generate().unwrap();
+        let p = presence(&alice, "alice", false);
+
+        reg.record(&p, vec![], DiscoverySource::Mdns, TrustState::Known, 100);
+        reg.mark_persisted(alice.peer_id(), "alice", 100);
+
+        assert!(reg.set_trust(alice.peer_id(), TrustState::Verified));
+
+        assert_eq!(
+            reg.snapshot()[0].trust,
+            TrustState::Verified,
+            "the roster updates at once"
+        );
+        assert_eq!(
+            reg.cached_trust(alice.peer_id(), "alice", 101),
+            None,
+            "the next sighting must re-read rather than restore the stale value",
+        );
+    }
+
+    #[test]
+    fn a_local_trust_decision_cannot_clear_a_conflict_warning() {
+        let (mut reg, _me) = registry();
+        let mallory = Identity::generate().unwrap();
+        let p = presence(&mallory, "alice", false);
+
+        reg.record(
+            &p,
+            vec![],
+            DiscoverySource::Mdns,
+            TrustState::NicknameConflict,
+            100,
+        );
+        reg.set_trust(mallory.peer_id(), TrustState::Verified);
+
+        assert_eq!(reg.snapshot()[0].trust, TrustState::NicknameConflict);
+    }
+
+    #[test]
     fn stale_peers_are_swept_and_reported() {
         let (mut reg, _me) = registry();
         let alice = Identity::generate().unwrap();
         let bob = Identity::generate().unwrap();
 
-        reg.record(&presence(&alice, "alice", false), vec![], DiscoverySource::Mdns, TrustState::New, 100);
-        reg.record(&presence(&bob, "bob", false), vec![], DiscoverySource::Mdns, TrustState::New, 180);
+        reg.record(
+            &presence(&alice, "alice", false),
+            vec![],
+            DiscoverySource::Mdns,
+            TrustState::New,
+            100,
+        );
+        reg.record(
+            &presence(&bob, "bob", false),
+            vec![],
+            DiscoverySource::Mdns,
+            TrustState::New,
+            180,
+        );
 
         let departed = reg.sweep(200);
 
@@ -245,8 +477,20 @@ mod tests {
         let zoe = Identity::generate().unwrap();
         let hub = Identity::generate().unwrap();
 
-        reg.record(&presence(&zoe, "zoe", false), vec![], DiscoverySource::Mdns, TrustState::New, 100);
-        reg.record(&presence(&hub, "library", true), vec![], DiscoverySource::Mdns, TrustState::New, 100);
+        reg.record(
+            &presence(&zoe, "zoe", false),
+            vec![],
+            DiscoverySource::Mdns,
+            TrustState::New,
+            100,
+        );
+        reg.record(
+            &presence(&hub, "library", true),
+            vec![],
+            DiscoverySource::Mdns,
+            TrustState::New,
+            100,
+        );
 
         let snapshot = reg.snapshot();
         assert!(snapshot[0].is_hub);
@@ -259,7 +503,13 @@ mod tests {
         let (mut reg, _me) = registry();
         for name in ["basecamp", "library", "firehouse"] {
             let hub = Identity::generate().unwrap();
-            reg.record(&presence(&hub, name, true), vec![], DiscoverySource::Mdns, TrustState::New, 100);
+            reg.record(
+                &presence(&hub, name, true),
+                vec![],
+                DiscoverySource::Mdns,
+                TrustState::New,
+                100,
+            );
         }
         // One vault, many neighborhoods: we never pick just one.
         assert_eq!(reg.hubs().len(), 3);

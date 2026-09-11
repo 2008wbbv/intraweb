@@ -36,7 +36,6 @@ pub struct Presence {
     pub peer_id: PeerId,
     pub nickname: String,
     pub api_port: u16,
-    pub transport_port: u16,
     pub is_hub: bool,
     pub hub_name: String,
     pub timestamp: u64,
@@ -47,7 +46,6 @@ impl Presence {
         identity: &Identity,
         nickname: &str,
         api_port: u16,
-        transport_port: u16,
         is_hub: bool,
         hub_name: &str,
     ) -> Self {
@@ -56,7 +54,6 @@ impl Presence {
             peer_id: identity.peer_id(),
             nickname: scrub(nickname),
             api_port,
-            transport_port,
             is_hub,
             hub_name: scrub(hub_name),
             timestamp: now_secs(),
@@ -71,12 +68,11 @@ impl Presence {
     /// ambiguous by a hostile nickname.
     pub fn signing_bytes(&self) -> Vec<u8> {
         format!(
-            "{SIGNING_DOMAIN}|{}|{}|{}|{}|{}|{}|{}|{}",
+            "{SIGNING_DOMAIN}|{}|{}|{}|{}|{}|{}|{}",
             self.version,
             self.peer_id.to_hex(),
             self.nickname,
             self.api_port,
-            self.transport_port,
             u8::from(self.is_hub),
             self.hub_name,
             self.timestamp,
@@ -90,9 +86,16 @@ impl Presence {
 
     /// Check a record's signature and freshness against our own clock.
     pub fn verify(&self, signature: &[u8], now: u64) -> Result<()> {
-        ensure!(self.version == PROTOCOL_VERSION, "unsupported protocol version {}", self.version);
+        ensure!(
+            self.version == PROTOCOL_VERSION,
+            "unsupported protocol version {}",
+            self.version
+        );
         let drift = now.abs_diff(self.timestamp);
-        ensure!(drift <= MAX_CLOCK_SKEW_SECS, "presence record is {drift}s out of date");
+        ensure!(
+            drift <= MAX_CLOCK_SKEW_SECS,
+            "presence record is {drift}s out of date"
+        );
         self.peer_id.verify(&self.signing_bytes(), signature)
     }
 
@@ -103,7 +106,6 @@ impl Presence {
             ("pk".into(), self.peer_id.to_hex()),
             ("nick".into(), self.nickname.clone()),
             ("api".into(), self.api_port.to_string()),
-            ("tx".into(), self.transport_port.to_string()),
             ("hub".into(), u8::from(self.is_hub).to_string()),
             ("hubname".into(), self.hub_name.clone()),
             ("ts".into(), self.timestamp.to_string()),
@@ -115,14 +117,15 @@ impl Presence {
     /// signature. The caller must still call [`Presence::verify`].
     pub fn from_txt(txt: &HashMap<String, String>) -> Result<(Self, Vec<u8>)> {
         let get = |key: &str| -> Result<String> {
-            txt.get(key).cloned().with_context(|| format!("presence is missing '{key}'"))
+            txt.get(key)
+                .cloned()
+                .with_context(|| format!("presence is missing '{key}'"))
         };
         let presence = Self {
             version: get("v")?.parse().context("bad version")?,
             peer_id: PeerId::parse_hex(&get("pk")?).context("bad public key")?,
             nickname: scrub(&get("nick")?),
             api_port: get("api")?.parse().context("bad api port")?,
-            transport_port: get("tx")?.parse().context("bad transport port")?,
             is_hub: get("hub")? == "1",
             hub_name: scrub(&get("hubname").unwrap_or_default()),
             timestamp: get("ts")?.parse().context("bad timestamp")?,
@@ -133,29 +136,46 @@ impl Presence {
 
     /// Serialize into a beacon datagram: magic, length, body, signature.
     pub fn to_beacon(&self, signature: &[u8]) -> Result<Vec<u8>> {
-        ensure!(signature.len() == SIG_LEN, "signature must be {SIG_LEN} bytes");
+        ensure!(
+            signature.len() == SIG_LEN,
+            "signature must be {SIG_LEN} bytes"
+        );
         let body = self.signing_bytes();
-        let len: u16 = body.len().try_into().context("presence record is too large")?;
+        let len: u16 = body
+            .len()
+            .try_into()
+            .context("presence record is too large")?;
 
         let mut packet = Vec::with_capacity(BEACON_MAGIC.len() + 2 + body.len() + SIG_LEN);
         packet.extend_from_slice(BEACON_MAGIC);
         packet.extend_from_slice(&len.to_be_bytes());
         packet.extend_from_slice(&body);
         packet.extend_from_slice(signature);
-        ensure!(packet.len() <= MAX_BEACON_BYTES, "beacon datagram is too large");
+        ensure!(
+            packet.len() <= MAX_BEACON_BYTES,
+            "beacon datagram is too large"
+        );
         Ok(packet)
     }
 
     /// Parse a beacon datagram. Every length is checked before it is trusted,
     /// because this runs on bytes from anyone who can reach the broadcast port.
     pub fn from_beacon(packet: &[u8]) -> Result<(Self, Vec<u8>)> {
-        ensure!(packet.len() <= MAX_BEACON_BYTES, "datagram exceeds the size limit");
-        ensure!(packet.len() > BEACON_MAGIC.len() + 2 + SIG_LEN, "datagram is too short");
+        ensure!(
+            packet.len() <= MAX_BEACON_BYTES,
+            "datagram exceeds the size limit"
+        );
+        ensure!(
+            packet.len() > BEACON_MAGIC.len() + 2 + SIG_LEN,
+            "datagram is too short"
+        );
         ensure!(&packet[..4] == BEACON_MAGIC, "not an intraweb beacon");
 
         let len = u16::from_be_bytes([packet[4], packet[5]]) as usize;
         let body_start = BEACON_MAGIC.len() + 2;
-        let body_end = body_start.checked_add(len).context("declared length overflows")?;
+        let body_end = body_start
+            .checked_add(len)
+            .context("declared length overflows")?;
         ensure!(
             packet.len() == body_end + SIG_LEN,
             "declared length does not match the datagram",
@@ -166,15 +186,22 @@ impl Presence {
         let presence = Self::from_signing_str(body)?;
         // Reject a record whose re-encoding differs from what was signed;
         // otherwise a hostile sender could smuggle fields past verification.
-        ensure!(presence.signing_bytes() == body.as_bytes(), "presence record is not canonical");
+        ensure!(
+            presence.signing_bytes() == body.as_bytes(),
+            "presence record is not canonical"
+        );
         Ok((presence, packet[body_end..].to_vec()))
     }
 
     fn from_signing_str(body: &str) -> Result<Self> {
         let parts: Vec<&str> = body.split('|').collect();
-        ensure!(parts.len() == 9, "presence record has {} fields, expected 9", parts.len());
+        ensure!(
+            parts.len() == 8,
+            "presence record has {} fields, expected 8",
+            parts.len()
+        );
         ensure!(parts[0] == SIGNING_DOMAIN, "unexpected signing domain");
-        let is_hub = match parts[6] {
+        let is_hub = match parts[5] {
             "0" => false,
             "1" => true,
             other => bail!("bad hub flag {other:?}"),
@@ -184,10 +211,9 @@ impl Presence {
             peer_id: PeerId::parse_hex(parts[2]).context("bad public key")?,
             nickname: parts[3].to_string(),
             api_port: parts[4].parse().context("bad api port")?,
-            transport_port: parts[5].parse().context("bad transport port")?,
             is_hub,
-            hub_name: parts[7].to_string(),
-            timestamp: parts[8].parse().context("bad timestamp")?,
+            hub_name: parts[6].to_string(),
+            timestamp: parts[7].parse().context("bad timestamp")?,
         })
     }
 }
@@ -199,7 +225,11 @@ fn scrub(raw: &str) -> String {
         .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
         .take(32)
         .collect();
-    if cleaned.is_empty() { "neighbor".to_string() } else { cleaned.to_lowercase() }
+    if cleaned.is_empty() {
+        "neighbor".to_string()
+    } else {
+        cleaned.to_lowercase()
+    }
 }
 
 #[cfg(test)]
@@ -207,7 +237,7 @@ mod tests {
     use super::*;
 
     fn presence_for(identity: &Identity) -> Presence {
-        Presence::new(identity, "ben", 8420, 8421, false, "basecamp")
+        Presence::new(identity, "ben", 8420, false, "basecamp")
     }
 
     #[test]
@@ -245,7 +275,10 @@ mod tests {
         forged.peer_id = alice.peer_id();
         let sig = forged.sign(&mallory);
 
-        assert!(forged.verify(&sig, now_secs()).is_err(), "forged identity must not verify");
+        assert!(
+            forged.verify(&sig, now_secs()).is_err(),
+            "forged identity must not verify"
+        );
     }
 
     #[test]
@@ -267,8 +300,14 @@ mod tests {
         let sig = presence.sign(&id);
 
         let far_future = presence.timestamp + MAX_CLOCK_SKEW_SECS + 60;
-        assert!(presence.verify(&sig, far_future).is_err(), "replayed record must be refused");
-        assert!(presence.verify(&sig, presence.timestamp + 10).is_ok(), "small drift is fine");
+        assert!(
+            presence.verify(&sig, far_future).is_err(),
+            "replayed record must be refused"
+        );
+        assert!(
+            presence.verify(&sig, presence.timestamp + 10).is_ok(),
+            "small drift is fine"
+        );
     }
 
     #[test]
@@ -288,7 +327,11 @@ mod tests {
             vec![0xff; MAX_BEACON_BYTES * 2],
         ];
         for case in cases {
-            assert!(Presence::from_beacon(&case).is_err(), "should reject {} bytes", case.len());
+            assert!(
+                Presence::from_beacon(&case).is_err(),
+                "should reject {} bytes",
+                case.len()
+            );
         }
     }
 
@@ -297,13 +340,16 @@ mod tests {
         let id = Identity::generate().unwrap();
         // A nickname stuffed with separators would let a sender forge extra
         // fields if it reached the encoder intact.
-        let presence = Presence::new(&id, "a|b|9999|1|evil", 8420, 8421, false, "hub");
+        let presence = Presence::new(&id, "a|b|9999|1|evil", 8420, false, "hub");
         assert!(!presence.nickname.contains('|'));
 
         let sig = presence.sign(&id);
         let packet = presence.to_beacon(&sig).unwrap();
         let (parsed, parsed_sig) = Presence::from_beacon(&packet).unwrap();
         parsed.verify(&parsed_sig, now_secs()).unwrap();
-        assert_eq!(parsed.api_port, 8420, "fields must not be smuggled in via the nickname");
+        assert_eq!(
+            parsed.api_port, 8420,
+            "fields must not be smuggled in via the nickname"
+        );
     }
 }

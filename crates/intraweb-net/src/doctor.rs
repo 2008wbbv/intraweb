@@ -34,7 +34,12 @@ pub struct Check {
 
 impl Check {
     fn pass(name: &'static str, detail: impl Into<String>) -> Self {
-        Self { name, status: Status::Pass, detail: detail.into(), remedy: None }
+        Self {
+            name,
+            status: Status::Pass,
+            detail: detail.into(),
+            remedy: None,
+        }
     }
 
     fn warn(name: &'static str, detail: impl Into<String>, remedy: impl Into<String>) -> Self {
@@ -91,13 +96,19 @@ pub async fn run(beacon_port: u16, listen: Duration) -> Result<Report> {
         ));
     } else {
         let list: Vec<String> = addrs.iter().map(|a| a.to_string()).collect();
-        checks.push(Check::pass("network interface", format!("reachable at {}", list.join(", "))));
+        checks.push(Check::pass(
+            "network interface",
+            format!("reachable at {}", list.join(", ")),
+        ));
     }
 
     // 2. Can we hold the beacon port?
     let beacon = match Beacon::bind(beacon_port) {
         Ok(beacon) => {
-            checks.push(Check::pass("beacon port", format!("bound udp/{beacon_port}")));
+            checks.push(Check::pass(
+                "beacon port",
+                format!("bound udp/{beacon_port}"),
+            ));
             Some(beacon)
         }
         Err(err) => {
@@ -114,7 +125,10 @@ pub async fn run(beacon_port: u16, listen: Duration) -> Result<Report> {
     //    holding 5353 announces itself as a problem.
     match mdns_sd::ServiceDaemon::new() {
         Ok(daemon) => {
-            checks.push(Check::pass("mdns responder", "started and holding udp/5353"));
+            checks.push(Check::pass(
+                "mdns responder",
+                "started and holding udp/5353",
+            ));
             let _ = daemon.shutdown();
         }
         Err(err) => checks.push(Check::warn(
@@ -147,7 +161,12 @@ pub async fn run(beacon_port: u16, listen: Duration) -> Result<Report> {
     });
 
     let verdict = verdict_for(addrs.is_empty(), mdns_peers, beacon_peers);
-    Ok(Report { checks, verdict, mdns_peers, beacon_peers })
+    Ok(Report {
+        checks,
+        verdict,
+        mdns_peers,
+        beacon_peers,
+    })
 }
 
 /// Listen on both discovery paths concurrently and count distinct peers.
@@ -186,7 +205,9 @@ async fn observe(beacon: Option<&Beacon>, listen: Duration) -> (usize, usize) {
         };
         let _ = tokio::time::timeout(listen, async {
             loop {
-                let Ok((packet, _from)) = beacon.recv().await else { continue };
+                let Ok((packet, _from)) = beacon.recv().await else {
+                    continue;
+                };
                 if let Ok((presence, _sig)) = Presence::from_beacon(&packet) {
                     seen.insert(presence.peer_id.to_hex());
                 }
@@ -242,7 +263,7 @@ fn verdict_for(no_interface: bool, mdns_peers: usize, beacon_peers: usize) -> St
 /// Confirm we can actually put a signed packet on the wire. Used by `doctor`
 /// to separate "nothing to hear" from "we cannot even transmit".
 pub async fn self_test_broadcast(beacon: &Beacon, identity: &Identity) -> Result<usize> {
-    let presence = Presence::new(identity, "doctor", 0, 0, false, "");
+    let presence = Presence::new(identity, "doctor", 0, false, "");
     let packet = presence.to_beacon(&presence.sign(identity))?;
     Ok(beacon.announce(&packet).await)
 }
@@ -255,14 +276,20 @@ mod tests {
     #[test]
     fn silence_everywhere_points_at_client_isolation() {
         let verdict = verdict_for(false, 0, 0);
-        assert!(verdict.contains("isolating clients"), "operators need the actual router term");
+        assert!(
+            verdict.contains("isolating clients"),
+            "operators need the actual router term"
+        );
     }
 
     #[test]
     fn broadcast_only_diagnoses_multicast_filtering() {
         let verdict = verdict_for(false, 0, 2);
         assert!(verdict.contains("filters multicast"));
-        assert!(verdict.contains(".local"), "must warn that names stop working");
+        assert!(
+            verdict.contains(".local"),
+            "must warn that names stop working"
+        );
     }
 
     #[test]
@@ -284,7 +311,10 @@ mod tests {
 
     #[test]
     fn broadcast_targets_are_never_empty() {
-        assert!(!broadcast_targets().is_empty(), "there is always a fallback target");
+        assert!(
+            !broadcast_targets().is_empty(),
+            "there is always a fallback target"
+        );
     }
 
     /// Deliberately makes no claim about how many nodes are around: the machine
@@ -294,12 +324,19 @@ mod tests {
     async fn doctor_reports_honestly_whoever_else_is_on_the_network() {
         let report = run(0, Duration::from_millis(250)).await.unwrap();
 
-        assert!(!report.checks.is_empty(), "a report with no checks tells nobody anything");
+        assert!(
+            !report.checks.is_empty(),
+            "a report with no checks tells nobody anything"
+        );
 
         // Whatever it heard, the verdict must be the reading of those counts.
         assert_eq!(
             report.verdict,
-            verdict_for(local_addresses().is_empty(), report.mdns_peers, report.beacon_peers),
+            verdict_for(
+                local_addresses().is_empty(),
+                report.mdns_peers,
+                report.beacon_peers
+            ),
             "the verdict must follow from the counts it reported",
         );
 
@@ -307,7 +344,11 @@ mod tests {
         // without saying what to do about it.
         for check in &report.checks {
             if check.status != Status::Pass {
-                assert!(check.remedy.is_some(), "check '{}' warns with no remedy", check.name);
+                assert!(
+                    check.remedy.is_some(),
+                    "check '{}' warns with no remedy",
+                    check.name
+                );
             }
         }
     }
@@ -317,7 +358,11 @@ mod tests {
         // Being first to arrive is normal, not an error worth exiting nonzero.
         let checks = vec![
             Check::pass("network interface", "reachable at 192.0.2.2"),
-            Check::warn("mdns peers", "heard nothing over multicast", "nobody else may be up"),
+            Check::warn(
+                "mdns peers",
+                "heard nothing over multicast",
+                "nobody else may be up",
+            ),
         ];
         let report = Report {
             checks,

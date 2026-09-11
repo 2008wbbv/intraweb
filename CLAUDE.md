@@ -28,10 +28,21 @@ Every design question resolves against that sentence. In particular:
 | --- | --- | --- |
 | `intraweb-core` | Identity, vault, config, SQLite keyring, peer types | Know anything about networks |
 | `intraweb-net` | mDNS, UDP beacon, roster, diagnostics, orchestration | Know anything about HTTP or the UI |
-| `intraweb-cli` | CLI, JSON API, web dashboard, terminal UI, HTTP probing | Hold state the roster should own |
+| `intraweb-cli` | CLI, JSON API, web dashboard, terminal UI, all HTTP | Hold state the roster should own |
 
 The split is what lets discovery be tested without touching identity, and the
 roster be rendered twice without duplicating logic.
+
+## One port, one protocol
+
+Everything a node says to another node goes over that node's own HTTP port:
+pages, mail, and file downloads. There is no second socket protocol, and
+`transport_port` was removed from the wire format in protocol v2.
+
+This is still direct point-to-point TCP — one socket dialled straight at the
+peer, no relay — and it buys ranged, resumable downloads for nothing, because
+`ServeDir` already implements them. Do not reintroduce a bespoke transport; if
+something needs a new verb, it is an HTTP route.
 
 ## Rules that are easy to get wrong
 
@@ -69,7 +80,22 @@ roster be rendered twice without duplicating logic.
     rows while drawing three lines plus borders, silently clipping the roster
     counts. `HEADER_LINES`/`HEADER_HEIGHT` encode the relationship and a test
     asserts it.
-11. **Tests never assume an empty network.** The machine running them may have
+11. **Addressing is by key; names are a convenience.** `mail::resolve` accepts
+    a nickname, a fingerprint prefix, or a full key, but a nickname held by two
+    keys is returned as `Ambiguous` and the caller must make a person choose.
+    Never break the tie automatically.
+12. **Mail to someone out of range must still queue.** That is what an outbox
+    is for. Addressing consults the keyring and accepts a bare public key, so a
+    key handed over on paper is enough to write to somebody.
+13. **Do not write to SQLite on every sighting.** Beacons arrive every couple of
+    seconds; the roster holds the live `last_seen` and the durable copy only
+    needs to be roughly right. `PeerRegistry::cached_trust` decides, and always
+    returns `None` for an unknown key or a changed nickname, because that is
+    where impersonation surfaces.
+14. **A local trust decision applies immediately.** Throttled write-through
+    means the next sighting would otherwise restore the stale value, so
+    verifying calls `Roster::note_verified` as well as the store.
+15. **Tests never assume an empty network.** The machine running them may have
     real nodes on it. Assert invariants (a warning always carries a remedy; the
     verdict follows from the counts), not specific peer counts.
 
@@ -100,6 +126,13 @@ sleep 4 && tmux capture-pane -p -t iw
 
 Beware `pkill -f intraweb` when cleaning up: the pattern matches the shell
 running it and kills your own command. Use `pkill -x intraweb`.
+
+`cargo fmt` reflows code, so a scripted string replacement written against
+pre-format source will silently miss. Format first, then patch, then re-check —
+a signature change whose body edit missed compiles perfectly and does nothing.
+
+CI runs `cargo fmt --all -- --check`, clippy with `-D warnings`, and the full
+suite. All three must be clean before pushing.
 
 Two nodes on one machine, which is also how discovery is tested end to end:
 

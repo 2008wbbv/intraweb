@@ -24,7 +24,10 @@ pub struct Roster {
 
 impl Roster {
     pub fn peers(&self) -> Vec<Peer> {
-        self.inner.read().map(|reg| reg.snapshot()).unwrap_or_default()
+        self.inner
+            .read()
+            .map(|reg| reg.snapshot())
+            .unwrap_or_default()
     }
 
     pub fn hubs(&self) -> Vec<Peer> {
@@ -33,6 +36,15 @@ impl Roster {
 
     pub fn len(&self) -> usize {
         self.inner.read().map(|reg| reg.len()).unwrap_or(0)
+    }
+
+    /// Record that the operator verified a peer, so the roster reflects it now
+    /// rather than at the next keyring write-through.
+    pub fn note_verified(&self, peer_id: intraweb_core::PeerId) -> bool {
+        self.inner
+            .write()
+            .map(|mut reg| reg.set_trust(peer_id, intraweb_core::TrustState::Verified))
+            .unwrap_or(false)
     }
 
     pub fn is_empty(&self) -> bool {
@@ -47,7 +59,11 @@ pub struct Node {
 
 impl Node {
     /// Start announcing and listening. Returns once both loops are running.
-    pub fn start(config: &Config, identity: Arc<Identity>, store: Arc<Mutex<Store>>) -> Result<Self> {
+    pub fn start(
+        config: &Config,
+        identity: Arc<Identity>,
+        store: Arc<Mutex<Store>>,
+    ) -> Result<Self> {
         Self::spawn(config, identity, store, true)
     }
 
@@ -75,16 +91,19 @@ impl Node {
             &identity,
             &nickname,
             config.api_port,
-            config.transport_port,
             config.hub,
             &config.hub_name,
         );
         let signature = presence.sign(&identity);
 
         let self_id = identity.peer_id();
-        let registry =
-            Arc::new(RwLock::new(PeerRegistry::new(self_id, config.peer_timeout_secs)));
-        let roster = Roster { inner: Arc::clone(&registry) };
+        let registry = Arc::new(RwLock::new(PeerRegistry::new(
+            self_id,
+            config.peer_timeout_secs,
+        )));
+        let roster = Roster {
+            inner: Arc::clone(&registry),
+        };
 
         let mdns = Arc::new(if announce {
             MdnsNode::start(&presence, &signature, config.hub)?
@@ -134,7 +153,6 @@ impl Node {
                             &identity,
                             &nickname,
                             config.api_port,
-                            config.transport_port,
                             config.hub,
                             &config.hub_name,
                         );
@@ -154,7 +172,9 @@ impl Node {
                 let store = Arc::clone(&store);
                 tokio::spawn(async move {
                     loop {
-                        let Ok((packet, from)) = beacon.recv().await else { continue };
+                        let Ok((packet, from)) = beacon.recv().await else {
+                            continue;
+                        };
                         let Ok((presence, signature)) = Presence::from_beacon(&packet) else {
                             continue;
                         };
@@ -224,19 +244,39 @@ fn absorb(
         return;
     }
 
-    // Scoped so the database lock is never held across the roster lock.
-    let trust = {
-        let Ok(store) = store.lock() else { return };
-        match store.observe_peer(presence.peer_id, &presence.nickname, now) {
-            Ok(trust) => trust,
-            Err(err) => {
-                tracing::warn!(%err, "could not record a peer sighting");
-                return;
+    // Most sightings are a peer we already know, saying the same thing it said
+    // two seconds ago. Those need no database write at all.
+    let cached = registry
+        .read()
+        .ok()
+        .and_then(|reg| reg.cached_trust(presence.peer_id, &presence.nickname, now));
+
+    let trust = match cached {
+        Some(trust) => trust,
+        None => {
+            // Scoped so the database lock is never held across the roster lock.
+            let persisted = {
+                let Ok(store) = store.lock() else { return };
+                store.observe_peer(presence.peer_id, &presence.nickname, now)
+            };
+            match persisted {
+                Ok(trust) => {
+                    if let Ok(mut reg) = registry.write() {
+                        reg.mark_persisted(presence.peer_id, &presence.nickname, now);
+                    }
+                    trust
+                }
+                Err(err) => {
+                    tracing::warn!(%err, "could not record a peer sighting");
+                    return;
+                }
             }
         }
     };
 
-    let Ok(mut reg) = registry.write() else { return };
+    let Ok(mut reg) = registry.write() else {
+        return;
+    };
     if reg.record(presence, addrs, source, trust, now) == Sighting::Arrived {
         tracing::info!(
             nickname = %presence.nickname,
@@ -261,10 +301,18 @@ mod tests {
         let store = Arc::new(Mutex::new(Store::open_in_memory().unwrap()));
         let registry = Arc::new(RwLock::new(PeerRegistry::new(self_id, 30)));
 
-        let mine = Presence::new(&me, "alice", 8420, 8421, true, "basecamp");
+        let mine = Presence::new(&me, "alice", 8420, true, "basecamp");
         let signature = mine.sign(&me);
 
-        absorb(&registry, &store, self_id, &mine, &signature, vec![], DiscoverySource::Beacon);
+        absorb(
+            &registry,
+            &store,
+            self_id,
+            &mine,
+            &signature,
+            vec![],
+            DiscoverySource::Beacon,
+        );
 
         assert_eq!(store.lock().unwrap().known_peer_count().unwrap(), 0);
         assert!(registry.read().unwrap().is_empty());
@@ -277,13 +325,24 @@ mod tests {
         let store = Arc::new(Mutex::new(Store::open_in_memory().unwrap()));
         let registry = Arc::new(RwLock::new(PeerRegistry::new(me.peer_id(), 30)));
 
-        let theirs = Presence::new(&bob, "bob", 8420, 8421, false, "");
+        let theirs = Presence::new(&bob, "bob", 8420, false, "");
         let signature = theirs.sign(&bob);
 
-        absorb(&registry, &store, me.peer_id(), &theirs, &signature, vec![], DiscoverySource::Mdns);
+        absorb(
+            &registry,
+            &store,
+            me.peer_id(),
+            &theirs,
+            &signature,
+            vec![],
+            DiscoverySource::Mdns,
+        );
 
         assert_eq!(store.lock().unwrap().known_peer_count().unwrap(), 1);
-        assert_eq!(registry.read().unwrap().snapshot()[0].trust, TrustState::New);
+        assert_eq!(
+            registry.read().unwrap().snapshot()[0].trust,
+            TrustState::New
+        );
     }
 
     #[test]
@@ -293,12 +352,24 @@ mod tests {
         let store = Arc::new(Mutex::new(Store::open_in_memory().unwrap()));
         let registry = Arc::new(RwLock::new(PeerRegistry::new(me.peer_id(), 30)));
 
-        let theirs = Presence::new(&mallory, "bob", 8420, 8421, false, "");
+        let theirs = Presence::new(&mallory, "bob", 8420, false, "");
         let wrong_signature = [0u8; 64];
 
-        absorb(&registry, &store, me.peer_id(), &theirs, &wrong_signature, vec![], DiscoverySource::Mdns);
+        absorb(
+            &registry,
+            &store,
+            me.peer_id(),
+            &theirs,
+            &wrong_signature,
+            vec![],
+            DiscoverySource::Mdns,
+        );
 
-        assert_eq!(store.lock().unwrap().known_peer_count().unwrap(), 0, "junk must not be filed");
+        assert_eq!(
+            store.lock().unwrap().known_peer_count().unwrap(),
+            0,
+            "junk must not be filed"
+        );
         assert!(registry.read().unwrap().is_empty());
     }
 }

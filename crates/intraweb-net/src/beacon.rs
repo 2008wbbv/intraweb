@@ -8,6 +8,8 @@
 use anyhow::{Context, Result};
 use socket2::{Domain, Protocol, Socket, Type};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4};
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 use tokio::net::UdpSocket;
 
 use crate::presence::MAX_BEACON_BYTES;
@@ -30,10 +32,16 @@ impl Beacon {
     pub fn bind(port: u16) -> Result<Self> {
         let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))
             .context("could not create the beacon socket")?;
-        socket.set_reuse_address(true).context("could not set SO_REUSEADDR")?;
+        socket
+            .set_reuse_address(true)
+            .context("could not set SO_REUSEADDR")?;
         #[cfg(all(unix, not(target_os = "solaris"), not(target_os = "illumos")))]
-        socket.set_reuse_port(true).context("could not set SO_REUSEPORT")?;
-        socket.set_broadcast(true).context("could not enable broadcast")?;
+        socket
+            .set_reuse_port(true)
+            .context("could not set SO_REUSEPORT")?;
+        socket
+            .set_broadcast(true)
+            .context("could not enable broadcast")?;
         socket.set_nonblocking(true)?;
 
         let bind_addr = SocketAddr::from((Ipv4Addr::UNSPECIFIED, port));
@@ -56,7 +64,7 @@ impl Beacon {
     /// (a downed VPN tunnel, say) must not stop the others.
     pub async fn announce(&self, packet: &[u8]) -> usize {
         let mut delivered = 0;
-        for target in broadcast_targets() {
+        for target in cached_broadcast_targets() {
             let dest = SocketAddr::V4(SocketAddrV4::new(target, self.port));
             match self.socket.send_to(packet, dest).await {
                 Ok(_) => delivered += 1,
@@ -70,7 +78,11 @@ impl Beacon {
     /// and the parser rejects anything that does not then add up.
     pub async fn recv(&self) -> Result<(Vec<u8>, SocketAddr)> {
         let mut buf = vec![0u8; MAX_BEACON_BYTES];
-        let (len, from) = self.socket.recv_from(&mut buf).await.context("beacon receive failed")?;
+        let (len, from) = self
+            .socket
+            .recv_from(&mut buf)
+            .await
+            .context("beacon receive failed")?;
         buf.truncate(len);
         Ok((buf, from))
     }
@@ -78,6 +90,37 @@ impl Beacon {
     pub fn local_addr(&self) -> Result<SocketAddr> {
         Ok(self.socket.local_addr()?)
     }
+}
+
+/// How long an interface enumeration stays good for.
+///
+/// Announcing every two seconds meant asking the kernel for the full interface
+/// list every two seconds, forever. Interfaces do change -- Wi-Fi drops, a
+/// tether appears -- but not on that timescale, so the answer is cached and
+/// refreshed occasionally instead.
+const INTERFACE_CACHE_TTL: Duration = Duration::from_secs(30);
+
+/// When the interface list was last read, and what it said.
+type InterfaceCache = Mutex<Option<(Instant, Vec<Ipv4Addr>)>>;
+
+fn interface_cache() -> &'static InterfaceCache {
+    static CACHE: OnceLock<InterfaceCache> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(None))
+}
+
+/// Per-interface broadcast addresses, refreshed at most every [`INTERFACE_CACHE_TTL`].
+pub fn cached_broadcast_targets() -> Vec<Ipv4Addr> {
+    let Ok(mut cache) = interface_cache().lock() else {
+        return broadcast_targets();
+    };
+    if let Some((fetched_at, targets)) = cache.as_ref()
+        && fetched_at.elapsed() < INTERFACE_CACHE_TTL
+    {
+        return targets.clone();
+    }
+    let targets = broadcast_targets();
+    *cache = Some((Instant::now(), targets.clone()));
+    targets
 }
 
 /// Per-interface broadcast addresses, plus the global fallback.
@@ -135,7 +178,7 @@ mod tests {
     async fn a_signed_presence_survives_the_wire() {
         let (beacon, port) = loopback_pair().await;
         let id = Identity::generate().unwrap();
-        let presence = Presence::new(&id, "ben", 8420, 8421, true, "basecamp");
+        let presence = Presence::new(&id, "ben", 8420, true, "basecamp");
         let packet = presence.to_beacon(&presence.sign(&id)).unwrap();
 
         let sender = UdpSocket::bind("127.0.0.1:0").await.unwrap();
@@ -156,12 +199,29 @@ mod tests {
         let port = first.local_addr().unwrap().port();
         let second = Beacon::bind(port);
 
-        assert!(second.is_ok(), "port reuse must allow a second node on the same host");
+        assert!(
+            second.is_ok(),
+            "port reuse must allow a second node on the same host"
+        );
     }
 
     #[test]
     fn broadcast_always_has_a_fallback_target() {
         let targets = broadcast_targets();
-        assert!(targets.contains(&Ipv4Addr::BROADCAST), "must always try limited broadcast");
+        assert!(
+            targets.contains(&Ipv4Addr::BROADCAST),
+            "must always try limited broadcast"
+        );
+    }
+
+    #[test]
+    fn the_cache_returns_the_same_targets_as_a_fresh_enumeration() {
+        // Caching must not change what we send to, only how often we ask.
+        assert_eq!(cached_broadcast_targets(), broadcast_targets());
+        assert_eq!(
+            cached_broadcast_targets(),
+            broadcast_targets(),
+            "second call hits the cache"
+        );
     }
 }

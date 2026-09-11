@@ -12,6 +12,6 @@ pub mod node;
 pub mod presence;
 pub mod registry;
 
-pub use presence::Presence;
 pub use node::{Node, Roster};
+pub use presence::Presence;
 pub use registry::{PeerRegistry, Sighting};

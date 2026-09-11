@@ -9,18 +9,24 @@ pub mod config;
 pub mod db;
 pub mod hex;
 pub mod identity;
+pub mod mail;
 pub mod peer;
 pub mod vault;
 
 pub use config::Config;
 pub use db::Store;
 pub use identity::{Identity, PeerId};
+pub use mail::{Mail, SignedMail};
 pub use peer::{DiscoverySource, Peer, TrustState, now_secs};
-pub use vault::Vault;
+pub use vault::{Runtime, Vault};
 
 /// Wire-protocol version. Bumped when the discovery payload changes shape, so
 /// a node from a future release is skipped rather than misread.
-pub const PROTOCOL_VERSION: u16 = 1;
+///
+/// v2 dropped the separate transport port: mail and file transfer ride the
+/// node's own HTTP port, which already gives resumable ranged downloads and
+/// keeps every exchange on one directly-dialled socket.
+pub const PROTOCOL_VERSION: u16 = 2;
 
 /// mDNS service type every node registers and browses for.
 pub const SERVICE_TYPE: &str = "_intraweb._tcp.local.";

@@ -14,6 +14,7 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::{Html, IntoResponse};
 use axum::routing::{get, post};
+use intraweb_core::SignedMail;
 use intraweb_core::identity::PeerId;
 use intraweb_core::peer::now_secs;
 use intraweb_core::{Config, Identity, Store, Vault};
@@ -51,10 +52,10 @@ struct Status {
     is_hub: bool,
     hub_name: Option<String>,
     api_port: u16,
-    transport_port: u16,
     peers_online: usize,
     hubs_online: usize,
     known_peers: u64,
+    unread_mail: u64,
     vault_path: String,
     site_path: String,
     uptime_secs: u64,
@@ -62,6 +63,10 @@ struct Status {
 }
 
 async fn status(State(state): State<AppState>) -> impl IntoResponse {
+    axum::Json(status_of(&state))
+}
+
+fn status_of(state: &AppState) -> Status {
     let known_peers = state
         .store
         .lock()
@@ -69,22 +74,27 @@ async fn status(State(state): State<AppState>) -> impl IntoResponse {
         .and_then(|store| store.known_peer_count().ok())
         .unwrap_or(0);
 
-    axum::Json(Status {
+    Status {
         nickname: state.config.sanitized_nickname(),
         peer_id: state.identity.peer_id().to_hex(),
         fingerprint: state.identity.fingerprint(),
         is_hub: state.config.hub,
         hub_name: state.config.hub.then(|| state.config.hub_name.clone()),
         api_port: state.config.api_port,
-        transport_port: state.config.transport_port,
         peers_online: state.roster.len(),
         hubs_online: state.roster.hubs().len(),
         known_peers,
+        unread_mail: state
+            .store
+            .lock()
+            .ok()
+            .and_then(|store| store.unread_count().ok())
+            .unwrap_or(0),
         vault_path: state.vault.root().display().to_string(),
         site_path: state.site_dir.display().to_string(),
         uptime_secs: now_secs().saturating_sub(state.started_at),
         now: now_secs(),
-    })
+    }
 }
 
 async fn peers(State(state): State<AppState>) -> impl IntoResponse {
@@ -118,11 +128,16 @@ async fn verify_peer(
         return (StatusCode::INTERNAL_SERVER_ERROR, "keyring is unavailable").into_response();
     };
     match store.mark_verified(peer_id) {
-        Ok(true) => (StatusCode::OK, "verified").into_response(),
-        Ok(false) => (StatusCode::NOT_FOUND, "we have never seen that peer").into_response(),
-        Err(err) => {
-            (StatusCode::INTERNAL_SERVER_ERROR, format!("could not verify: {err}")).into_response()
+        Ok(true) => {
+            state.roster.note_verified(peer_id);
+            (StatusCode::OK, "verified").into_response()
         }
+        Ok(false) => (StatusCode::NOT_FOUND, "we have never seen that peer").into_response(),
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("could not verify: {err}"),
+        )
+            .into_response(),
     }
 }
 
@@ -130,10 +145,199 @@ async fn verify_peer(
 async fn doctor(State(state): State<AppState>) -> impl IntoResponse {
     match intraweb_net::doctor::run(state.config.beacon_port, Duration::from_secs(3)).await {
         Ok(report) => axum::Json(report).into_response(),
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("diagnosis failed: {err}"),
+        )
+            .into_response(),
+    }
+}
+
+/// Take delivery of a message from another node.
+///
+/// Two things are checked before anything is written: that the signature
+/// matches the key the message names, and that it is addressed to us. The
+/// second stops this node being used as a drop box for other people's mail.
+async fn receive_mail(State(state): State<AppState>, body: String) -> impl IntoResponse {
+    let sealed: SignedMail = match serde_json::from_str(&body) {
+        Ok(sealed) => sealed,
         Err(err) => {
-            (StatusCode::INTERNAL_SERVER_ERROR, format!("diagnosis failed: {err}")).into_response()
+            return (
+                StatusCode::BAD_REQUEST,
+                format!("unreadable message: {err}"),
+            )
+                .into_response();
+        }
+    };
+
+    if let Err(err) = sealed.accept(state.identity.peer_id()) {
+        // Unsigned or misaddressed mail on an open network is noise, not news.
+        tracing::debug!(%err, "refused an incoming message");
+        return (StatusCode::FORBIDDEN, format!("refused: {err}")).into_response();
+    }
+
+    let Ok(store) = state.store.lock() else {
+        return (StatusCode::SERVICE_UNAVAILABLE, "the mail store is busy").into_response();
+    };
+    match store.store_incoming(&sealed, now_secs()) {
+        // A duplicate still reports success: the sender has done its job and
+        // should stop retrying.
+        Ok(filed) => {
+            if filed {
+                tracing::info!(
+                    from = %sealed.mail.from.fingerprint(),
+                    subject = %sealed.mail.subject,
+                    "mail received",
+                );
+            }
+            (StatusCode::OK, if filed { "filed" } else { "already held" }).into_response()
+        }
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("could not file it: {err}"),
+        )
+            .into_response(),
+    }
+}
+
+/// Everything the dashboard needs, in one request.
+///
+/// It used to poll status and peers separately every couple of seconds, which
+/// doubled the traffic and the wakeups for no benefit -- they are always
+/// rendered together.
+async fn combined_state(State(state): State<AppState>) -> impl IntoResponse {
+    let status = status_of(&state);
+    let peers = state.roster.peers();
+    let mail = state
+        .store
+        .lock()
+        .ok()
+        .and_then(|store| store.inbox(50).ok())
+        .unwrap_or_default();
+
+    axum::Json(serde_json::json!({ "status": status, "peers": peers, "mail": mail }))
+}
+
+#[derive(serde::Deserialize)]
+struct Compose {
+    to: String,
+    #[serde(default)]
+    subject: String,
+    #[serde(default)]
+    body: String,
+}
+
+/// Queue a message written in the dashboard.
+///
+/// Resolution is the same as the CLI's, ambiguity included: a nickname held by
+/// two keys is reported back rather than resolved to whichever came first.
+async fn send_mail(State(state): State<AppState>, body: String) -> impl IntoResponse {
+    let Ok(compose) = serde_json::from_str::<Compose>(&body) else {
+        return (StatusCode::BAD_REQUEST, "could not read that form").into_response();
+    };
+
+    let peers = crate::mail::addressable(&state.roster.peers(), &state.store);
+    let recipient = match crate::mail::resolve_or_explain(&peers, &compose.to) {
+        Ok(peer) => peer,
+        Err(err) => return (StatusCode::BAD_REQUEST, format!("{err:#}")).into_response(),
+    };
+
+    match crate::mail::queue(
+        &state.store,
+        state.identity.peer_id(),
+        recipient.peer_id,
+        &compose.subject,
+        &compose.body,
+    ) {
+        Ok(_) => (
+            StatusCode::OK,
+            format!(
+                "Queued for {} ({})",
+                recipient.nickname, recipient.fingerprint
+            ),
+        )
+            .into_response(),
+        Err(err) => (StatusCode::INTERNAL_SERVER_ERROR, format!("{err:#}")).into_response(),
+    }
+}
+
+async fn inbox(State(state): State<AppState>) -> impl IntoResponse {
+    let messages = state
+        .store
+        .lock()
+        .ok()
+        .and_then(|store| store.inbox(100).ok())
+        .unwrap_or_default();
+    axum::Json(messages)
+}
+
+async fn outbox(State(state): State<AppState>) -> impl IntoResponse {
+    let messages = state
+        .store
+        .lock()
+        .ok()
+        .and_then(|store| store.outbox(100).ok())
+        .unwrap_or_default();
+    axum::Json(messages)
+}
+
+async fn mark_all_read(State(state): State<AppState>) -> impl IntoResponse {
+    let Ok(store) = state.store.lock() else {
+        return (StatusCode::SERVICE_UNAVAILABLE, "the mail store is busy").into_response();
+    };
+    match store.mark_all_read(now_secs()) {
+        Ok(count) => (StatusCode::OK, count.to_string()).into_response(),
+        Err(err) => (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response(),
+    }
+}
+
+#[derive(Serialize)]
+struct SharedFile {
+    path: String,
+    size: u64,
+}
+
+/// What this node is sharing, so a peer can list it before downloading.
+async fn shared_files(State(state): State<AppState>) -> impl IntoResponse {
+    axum::Json(walk_files(&state.vault.files_dir()))
+}
+
+/// Cap on how much of a shared tree we will enumerate in one listing.
+const MAX_LISTED_FILES: usize = 1000;
+
+fn walk_files(root: &std::path::Path) -> Vec<SharedFile> {
+    let mut out = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            if out.len() >= MAX_LISTED_FILES {
+                return out;
+            }
+            let path = entry.path();
+            let Ok(meta) = entry.metadata() else { continue };
+            // Follow no symlinks: a link out of the shared folder would publish
+            // whatever it points at.
+            if meta.file_type().is_symlink() {
+                continue;
+            }
+            if meta.is_dir() {
+                stack.push(path);
+            } else if meta.is_file()
+                && let Ok(relative) = path.strip_prefix(root)
+            {
+                out.push(SharedFile {
+                    path: relative.to_string_lossy().replace('\\', "/"),
+                    size: meta.len(),
+                });
+            }
         }
     }
+    out.sort_by(|a, b| a.path.cmp(&b.path));
+    out
 }
 
 pub fn router(state: AppState) -> Router {
@@ -153,7 +357,10 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/app.js",
             get(|| async {
-                ([("content-type", "text/javascript; charset=utf-8")], DASHBOARD_JS)
+                (
+                    [("content-type", "text/javascript; charset=utf-8")],
+                    DASHBOARD_JS,
+                )
             }),
         )
         .route("/api/status", get(status))
@@ -161,7 +368,14 @@ pub fn router(state: AppState) -> Router {
         .route("/api/hubs", get(hubs))
         .route("/api/hubs/history", get(hub_history))
         .route("/api/doctor", get(doctor))
+        .route("/api/state", get(combined_state))
+        .route("/api/mail", get(inbox).post(receive_mail))
+        .route("/api/mail/send", post(send_mail))
+        .route("/api/mail/outbox", get(outbox))
+        .route("/api/mail/read", post(mark_all_read))
+        .route("/api/files", get(shared_files))
         .route("/api/peers/{peer_id}/verify", post(verify_peer))
+        .layer(axum::extract::DefaultBodyLimit::max(256 * 1024))
         .nest_service(&format!("/~{nickname}"), site)
         .nest_service("/files", files)
         .with_state(state)
@@ -183,7 +397,8 @@ pub fn should_try_low_port(is_hub: bool, port_was_chosen: bool) -> bool {
 /// a working node, just at a longer URL.
 pub async fn bind(preferred_low_port: bool, port: u16) -> Result<(tokio::net::TcpListener, u16)> {
     if preferred_low_port {
-        if let Ok(listener) = tokio::net::TcpListener::bind(SocketAddr::from(([0, 0, 0, 0], 80))).await
+        if let Ok(listener) =
+            tokio::net::TcpListener::bind(SocketAddr::from(([0, 0, 0, 0], 80))).await
         {
             return Ok((listener, 80));
         }

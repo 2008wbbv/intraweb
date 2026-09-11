@@ -67,7 +67,9 @@ impl SiteCard {
 
 /// Ask every peer what it is serving, all at once.
 pub async fn survey(peers: Vec<Peer>, timeout: Duration) -> Vec<SiteCard> {
-    let probes = peers.into_iter().map(|peer| async move { probe(&peer, timeout).await });
+    let probes = peers
+        .into_iter()
+        .map(|peer| async move { probe(&peer, timeout).await });
     // Concurrent on purpose: a dozen neighbors should take one timeout, not a dozen.
     futures_lite(probes).await
 }
@@ -153,7 +155,13 @@ async fn fetch(addr: IpAddr, port: u16, path: &str) -> Result<String> {
 
 /// Pull the status code out of an HTTP response.
 fn parse_status(response: &str) -> Option<u16> {
-    response.lines().next()?.split_whitespace().nth(1)?.parse().ok()
+    response
+        .lines()
+        .next()?
+        .split_whitespace()
+        .nth(1)?
+        .parse()
+        .ok()
 }
 
 /// Extract and tidy a page's `<title>`.
@@ -238,21 +246,28 @@ mod tests {
     fn reads_a_title_from_an_ordinary_page() {
         let response = "HTTP/1.0 200 OK\r\nContent-Type: text/html\r\n\r\n\
                         <!doctype html><head><title>Basecamp Notice Board</title></head>";
-        assert_eq!(extract_title(response).as_deref(), Some("Basecamp Notice Board"));
+        assert_eq!(
+            extract_title(response).as_deref(),
+            Some("Basecamp Notice Board")
+        );
     }
 
     #[test]
     fn copes_with_hand_written_markup() {
         // Odd casing, an attribute on the tag, and a title spread over lines --
         // all things a person writing HTML by hand actually does.
-        let response = "HTTP/1.0 200 OK\r\n\r\n<HTML><TITLE lang=\"en\">\n  Ben's\n  Photos\n</TITLE>";
+        let response =
+            "HTTP/1.0 200 OK\r\n\r\n<HTML><TITLE lang=\"en\">\n  Ben's\n  Photos\n</TITLE>";
         assert_eq!(extract_title(response).as_deref(), Some("Ben's Photos"));
     }
 
     #[test]
     fn decodes_entities_without_double_decoding() {
         let response = "HTTP/1.0 200 OK\r\n\r\n<title>Tools &amp; Spares &#39;24</title>";
-        assert_eq!(extract_title(response).as_deref(), Some("Tools & Spares '24"));
+        assert_eq!(
+            extract_title(response).as_deref(),
+            Some("Tools & Spares '24")
+        );
 
         // An escaped entity must survive as text rather than becoming a tag.
         let tricky = "HTTP/1.0 200 OK\r\n\r\n<title>&amp;lt;not a tag&amp;gt;</title>";
@@ -261,9 +276,18 @@ mod tests {
 
     #[test]
     fn missing_or_empty_titles_are_none() {
-        assert_eq!(extract_title("HTTP/1.0 200 OK\r\n\r\n<p>no title here</p>"), None);
-        assert_eq!(extract_title("HTTP/1.0 200 OK\r\n\r\n<title>   </title>"), None);
-        assert_eq!(extract_title("HTTP/1.0 200 OK\r\n\r\n<title>unterminated"), None);
+        assert_eq!(
+            extract_title("HTTP/1.0 200 OK\r\n\r\n<p>no title here</p>"),
+            None
+        );
+        assert_eq!(
+            extract_title("HTTP/1.0 200 OK\r\n\r\n<title>   </title>"),
+            None
+        );
+        assert_eq!(
+            extract_title("HTTP/1.0 200 OK\r\n\r\n<title>unterminated"),
+            None
+        );
     }
 
     #[test]
@@ -288,21 +312,36 @@ mod tests {
         let mut impostor = card(Some("Photos"), true, Some(200));
         impostor.trust = TrustState::NicknameConflict;
 
-        let warning = impostor.warning().expect("a name clash must never render silently");
+        let warning = impostor
+            .warning()
+            .expect("a name clash must never render silently");
         assert!(warning.contains("different key"));
-        assert!(warning.contains("aaaa-bbbb-cccc-dddd"), "must show how to tell them apart");
+        assert!(
+            warning.contains("aaaa-bbbb-cccc-dddd"),
+            "must show how to tell them apart"
+        );
     }
 
     #[test]
     fn ordinary_neighbors_carry_no_warning() {
-        assert!(card(Some("Notice Board"), true, Some(200)).warning().is_none());
+        assert!(
+            card(Some("Notice Board"), true, Some(200))
+                .warning()
+                .is_none()
+        );
     }
 
     #[test]
     fn descriptions_say_what_actually_happened() {
-        assert_eq!(card(Some("Notice Board"), true, Some(200)).describe(), "Notice Board");
+        assert_eq!(
+            card(Some("Notice Board"), true, Some(200)).describe(),
+            "Notice Board"
+        );
         assert_eq!(card(None, true, Some(200)).describe(), "untitled page");
-        assert_eq!(card(None, true, Some(404)).describe(), "no site here (HTTP 404)");
+        assert_eq!(
+            card(None, true, Some(404)).describe(),
+            "no site here (HTTP 404)"
+        );
         assert_eq!(card(None, false, None).describe(), "not answering");
     }
 
@@ -315,7 +354,6 @@ mod tests {
             nickname: "ghost".into(),
             addrs: vec![],
             api_port: 8420,
-            transport_port: 8421,
             is_hub: false,
             hub_name: None,
             source: DiscoverySource::Mdns,
@@ -339,7 +377,6 @@ mod tests {
             // Port 1 on loopback: nothing is listening there.
             addrs: vec![IpAddr::V4(Ipv4Addr::LOCALHOST)],
             api_port: 1,
-            transport_port: 8421,
             is_hub: false,
             hub_name: None,
             source: DiscoverySource::Beacon,

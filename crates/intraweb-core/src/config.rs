@@ -6,8 +6,6 @@ use std::path::Path;
 
 /// Dashboard and JSON API. The hub also tries port 80 so URLs stay clean.
 pub const DEFAULT_API_PORT: u16 = 8420;
-/// Direct peer-to-peer transport for mail and file streams.
-pub const DEFAULT_TRANSPORT_PORT: u16 = 8421;
 /// UDP broadcast beacon, used where the network filters multicast.
 pub const DEFAULT_BEACON_PORT: u16 = 8420;
 
@@ -29,8 +27,9 @@ pub struct Config {
     /// This is what makes one vault appear across many neighborhoods at once.
     pub join_all_hubs: bool,
 
+    /// Dashboard, JSON API, mail delivery, and file downloads. One port: a
+    /// peer that can show you a page can also take your mail.
     pub api_port: u16,
-    pub transport_port: u16,
     pub beacon_port: u16,
 
     /// Send UDP broadcast beacons as well as mDNS. Cheap insurance: plenty of
@@ -49,7 +48,6 @@ impl Default for Config {
             hub_name: "neighborhood".to_string(),
             join_all_hubs: true,
             api_port: DEFAULT_API_PORT,
-            transport_port: DEFAULT_TRANSPORT_PORT,
             beacon_port: DEFAULT_BEACON_PORT,
             beacon_enabled: true,
             peer_timeout_secs: 30,
@@ -88,7 +86,11 @@ impl Config {
             .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
             .take(32)
             .collect();
-        if cleaned.is_empty() { "neighbor".to_string() } else { cleaned.to_lowercase() }
+        if cleaned.is_empty() {
+            "neighbor".to_string()
+        } else {
+            cleaned.to_lowercase()
+        }
     }
 }
 
@@ -137,7 +139,10 @@ mod tests {
 
     #[test]
     fn empty_nickname_falls_back() {
-        let config = Config { nickname: "!!!".to_string(), ..Config::default() };
+        let config = Config {
+            nickname: "!!!".to_string(),
+            ..Config::default()
+        };
         assert_eq!(config.sanitized_nickname(), "neighbor");
     }
 }

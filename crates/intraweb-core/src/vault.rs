@@ -64,6 +64,15 @@ impl Vault {
         self.root.join("intraweb.db")
     }
 
+    /// Where a running node advertises the port it actually bound.
+    ///
+    /// Without this, a command run against a node started on a non-default
+    /// port would re-discover the whole network for several seconds to learn
+    /// what the node three feet away already knows.
+    pub fn runtime_path(&self) -> PathBuf {
+        self.root.join("runtime.json")
+    }
+
     /// Your mini-site. Public to every hub you join.
     pub fn site_dir(&self) -> PathBuf {
         self.root.join("site")
@@ -90,6 +99,38 @@ impl Vault {
                 .with_context(|| format!("could not write {}", landing.display()))?;
         }
         Ok(())
+    }
+}
+
+/// What a running node publishes about itself for local commands to find.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct Runtime {
+    pub api_port: u16,
+    pub pid: u32,
+}
+
+impl Runtime {
+    pub fn new(api_port: u16) -> Self {
+        Self {
+            api_port,
+            pid: std::process::id(),
+        }
+    }
+
+    pub fn save(&self, path: &Path) -> Result<()> {
+        let body = serde_json::to_string(self).context("could not encode the runtime marker")?;
+        std::fs::write(path, body).with_context(|| format!("could not write {}", path.display()))
+    }
+
+    /// Read the marker, if a node left one. A stale file is harmless: the
+    /// caller finds nothing answering and falls back to listening.
+    pub fn load(path: &Path) -> Option<Self> {
+        let raw = std::fs::read_to_string(path).ok()?;
+        serde_json::from_str(&raw).ok()
+    }
+
+    pub fn clear(path: &Path) {
+        let _ = std::fs::remove_file(path);
     }
 }
 
@@ -140,6 +181,37 @@ mod tests {
 
         let kept = std::fs::read_to_string(vault.site_dir().join("index.html")).unwrap();
         assert_eq!(kept, "mine", "restart must never overwrite a user's site");
+    }
+
+    #[test]
+    fn a_running_node_can_be_found_by_local_commands() {
+        let dir = tempfile::tempdir().unwrap();
+        let vault = Vault::new(dir.path());
+        vault.ensure().unwrap();
+
+        assert!(
+            Runtime::load(&vault.runtime_path()).is_none(),
+            "nothing running yet"
+        );
+
+        Runtime::new(8480).save(&vault.runtime_path()).unwrap();
+        assert_eq!(Runtime::load(&vault.runtime_path()).unwrap().api_port, 8480);
+
+        Runtime::clear(&vault.runtime_path());
+        assert!(
+            Runtime::load(&vault.runtime_path()).is_none(),
+            "cleared on shutdown"
+        );
+    }
+
+    #[test]
+    fn a_corrupt_runtime_marker_is_ignored_rather_than_fatal() {
+        let dir = tempfile::tempdir().unwrap();
+        let vault = Vault::new(dir.path());
+        vault.ensure().unwrap();
+        std::fs::write(vault.runtime_path(), "not json at all").unwrap();
+
+        assert!(Runtime::load(&vault.runtime_path()).is_none());
     }
 
     #[test]
